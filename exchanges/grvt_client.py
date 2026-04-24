@@ -121,6 +121,14 @@ class GrvtClient(BaseExchangeClient):
     async def get_funding_rate(self, symbol: str) -> Optional[float]:
         try:
             grvt_sym = self._grvt_symbol(symbol)
+            try:
+                result = await self._retry(self._api.fetch_funding_rate, grvt_sym)
+                if result:
+                    rate = result.get("fundingRate")
+                    if rate is not None:
+                        return float(rate)
+            except (AttributeError, Exception):
+                pass
             result = await self._retry(self._api.fetch_funding_rate_history, grvt_sym, None, 1)
             if result and len(result) > 0:
                 return float(result[0].get("fundingRate", 0))
@@ -160,8 +168,18 @@ class GrvtClient(BaseExchangeClient):
             close_side, close_price = "sell", price * (1 - slippage_pct)
         else:
             close_side, close_price = "buy", price * (1 + slippage_pct)
-        result = await self.place_limit_order(symbol, close_side, size, close_price)
-        return result.status in ("filled", "closed")
+        try:
+            grvt_sym = self._grvt_symbol(symbol)
+            result = await self._retry(
+                self._api.create_order,
+                grvt_sym, "limit", close_side, size, close_price,
+            )
+            if result:
+                status = result.get("status", "")
+                return status in ("closed", "filled")
+        except Exception as e:
+            logger.error(f"GRVT close_position: {e}")
+        return False
 
     async def cancel_all_orders(self, symbol: str) -> bool:
         try:

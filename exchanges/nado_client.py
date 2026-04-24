@@ -150,8 +150,8 @@ class NadoClient(BaseExchangeClient):
                 return OrderResult(
                     order_id=str(result.get("id", result.get("order_id", ""))),
                     status="filled" if result.get("status") in ("filled", "matched") else "live",
-                    filled_size=size,
-                    filled_price=price,
+                    filled_size=float(result.get("filled_size", result.get("filled_amount", result.get("executed_qty", size)))),
+                    filled_price=float(result.get("average_price", result.get("avg_price", result.get("fill_price", price)))),
                 )
         except Exception as e:
             logger.error(f"NADO place_limit_order: {e}")
