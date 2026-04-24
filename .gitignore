@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+logs/
+.stop_bot
+*.egg-info/
