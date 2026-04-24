@@ -27,7 +27,7 @@
 | `pair_manager.py` | 공통 페어 탐색, 부스트 관리, 스코어링 | 신규 |
 | `monitor.py` | Circuit Breaker, 마진 체크, 괴리 감시 | 신규 |
 | `telegram_ui.py` | 텔레그램 버튼 UI, 알림 | 신규 |
-| `bot_core.py` | 상태머신, 메인 루프, 청크 진입/퇴출, 크래시 복구 | 신규 |
+| `grvtnado.py` | 상태머신, 메인 루프, 청크 진입/퇴출, 크래시 복구 | 신규 |
 | `run_bot.py` | Watchdog 엔트리포인트 | 신규 |
 | `.env.example` | 환경변수 템플릿 | 신규 |
 | `requirements.txt` | 의존성 | 신규 |
@@ -1867,17 +1867,17 @@ git commit -m "feat: telegram_ui.py — 버튼 UI, 폴링, 알림"
 
 ---
 
-## Task 11: bot_core.py — 상태머신 & 메인 루프
+## Task 11: grvtnado.py — 상태머신 & 메인 루프
 
 **Files:**
-- Create: `bot_core.py`
+- Create: `grvtnado.py`
 
-> 이 파일은 프로젝트에서 가장 큰 파일이오. 기존 delta_neutral_bot의 bot_core.py 패턴을 따르되, NADO/GRVT 특화 로직과 EarnManager/PairManager를 통합.
+> 이 파일은 프로젝트에서 가장 큰 파일이오. 기존 delta_neutral_bot의 grvtnado.py 패턴을 따르되, NADO/GRVT 특화 로직과 EarnManager/PairManager를 통합.
 
-- [ ] **Step 1: bot_core.py 구현 — Part 1: 초기화 및 상태 관리**
+- [ ] **Step 1: grvtnado.py 구현 — Part 1: 초기화 및 상태 관리**
 
 ```python
-# bot_core.py
+# grvtnado.py
 import asyncio
 import json
 import logging
@@ -1964,10 +1964,10 @@ class DeltaNeutralBot:
             f.write(json.dumps({**data, "ts": time.time()}) + "\n")
 ```
 
-- [ ] **Step 2: bot_core.py — Part 2: 상태머신**
+- [ ] **Step 2: grvtnado.py — Part 2: 상태머신**
 
 ```python
-    # --- 상태머신 (bot_core.py에 이어서) ---
+    # --- 상태머신 (grvtnado.py에 이어서) ---
 
     async def _run_state_machine(self):
         state = self._state.cycle_state
@@ -2212,10 +2212,10 @@ class DeltaNeutralBot:
             self._save_state()
 ```
 
-- [ ] **Step 3: bot_core.py — Part 3: 청크 진입/퇴출**
+- [ ] **Step 3: grvtnado.py — Part 3: 청크 진입/퇴출**
 
 ```python
-    # --- 청크 진입/퇴출 (bot_core.py에 이어서) ---
+    # --- 청크 진입/퇴출 (grvtnado.py에 이어서) ---
 
     async def _execute_enter(self, pair: str, direction: str, notional: float) -> bool:
         chunk_size = notional / self.cfg.ENTRY_CHUNKS
@@ -2315,10 +2315,10 @@ class DeltaNeutralBot:
         await self._telegram.send_alert(f"[🚨 EMERGENCY EXIT] {reason}")
 ```
 
-- [ ] **Step 4: bot_core.py — Part 4: 메인 루프, Telegram 핸들러, 크래시 복구**
+- [ ] **Step 4: grvtnado.py — Part 4: 메인 루프, Telegram 핸들러, 크래시 복구**
 
 ```python
-    # --- 메인 루프 및 핸들러 (bot_core.py에 이어서) ---
+    # --- 메인 루프 및 핸들러 (grvtnado.py에 이어서) ---
 
     def _check_earn_cycle(self):
         now = datetime.now(timezone.utc)
@@ -2555,15 +2555,15 @@ class DeltaNeutralBot:
         await self._telegram.close()
 ```
 
-- [ ] **Step 5: bot_core.py 상단에 os import 추가**
+- [ ] **Step 5: grvtnado.py 상단에 os import 추가**
 
 `import os`를 import 블록에 추가.
 
 - [ ] **Step 6: 커밋**
 
 ```bash
-git add bot_core.py
-git commit -m "feat: bot_core.py — 상태머신, 청크 진입/퇴출, Earn 관리, 텔레그램 UI, 크래시 복구"
+git add grvtnado.py
+git commit -m "feat: grvtnado.py — 상태머신, 청크 진입/퇴출, Earn 관리, 텔레그램 UI, 크래시 복구"
 ```
 
 ---

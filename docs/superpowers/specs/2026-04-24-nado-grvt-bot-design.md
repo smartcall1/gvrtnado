@@ -11,7 +11,7 @@
 | 순위 | 목적 | 설명 |
 |------|------|------|
 | 1 | NADO 포인트 | 주간 95만 pt 배분, 페어 부스트 추적하여 극대화 |
-| 2 | GRVT Earn on Equity | 매 4주 사이클 $300K 볼륨 + 5 trades → 기본 3.5% + 볼륨 +2% = 6.5% APY |
+| 2 | GRVT Earn on Equity | 매 4주 사이클 $300K 볼륨 + 5 trades → Base 3.5% + 레퍼럴 1% + 볼륨 +2% = 목표 6.5% APY (최대 11%) |
 | 3 | GRVT 포인트 | TGE 예정, 28% 에어드롭 |
 | 4 | 펀딩비 수익 | 양쪽 펀딩레이트 차이 수취 |
 | 5 | 스프레드 차익 | 델타순합(스프레드 MTM) 이상 증가 시 차익 실현 |
@@ -56,7 +56,7 @@
 
 ```
 D:\Codes\nado_grvt_bot\
-├── bot_core.py              # 상태머신 (IDLE→ANALYZE→ENTER→HOLD→EXIT→COOLDOWN)
+├── grvtnado.py              # 상태머신 (IDLE→ANALYZE→ENTER→HOLD→EXIT→COOLDOWN)
 ├── config.py                # 환경변수 기반 설정
 ├── models.py                # Position, Cycle, BotState, EarnState
 ├── strategy.py              # 진입/퇴출 판단, 펀딩레이트 비교, 모드 전환
