@@ -11,6 +11,13 @@ SYMBOL_MAP = {
     "BTC": "BTC_USDT_Perp",
     "ETH": "ETH_USDT_Perp",
     "SOL": "SOL_USDT_Perp",
+    "AAPL": "AAPL_USDT_Perp",
+    "AMZN": "AMZN_USDT_Perp",
+    "MSFT": "MSFT_USDT_Perp",
+    "META": "META_USDT_Perp",
+    "GOOGL": "GOOGL_USDT_Perp",
+    "NVDA": "NVDA_USDT_Perp",
+    "TSLA": "TSLA_USDT_Perp",
 }
 
 
