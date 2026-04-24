@@ -21,6 +21,8 @@ class GrvtClient(BaseExchangeClient):
         self._account_id = trading_account_id
         self._api = None
         self._ws_prices: dict[str, float] = {}
+        self._ws_prices_ts: dict[str, float] = {}
+        self._price_cache_ttl = 3.0
 
     def _grvt_symbol(self, symbol: str) -> str:
         return SYMBOL_MAP.get(symbol.upper(), f"{symbol.upper()}_USDT_Perp")
@@ -92,8 +94,10 @@ class GrvtClient(BaseExchangeClient):
         return []
 
     async def get_mark_price(self, symbol: str) -> Optional[float]:
+        import time
         cached = self._ws_prices.get(symbol)
-        if cached:
+        cached_ts = self._ws_prices_ts.get(symbol, 0)
+        if cached and (time.time() - cached_ts) < self._price_cache_ttl:
             return cached
         try:
             grvt_sym = self._grvt_symbol(symbol)
@@ -101,6 +105,7 @@ class GrvtClient(BaseExchangeClient):
             if ticker:
                 price = float(ticker.get("mark", ticker.get("last", 0)))
                 self._ws_prices[symbol] = price
+                self._ws_prices_ts[symbol] = time.time()
                 return price
         except Exception as e:
             logger.error(f"GRVT get_mark_price: {e}")

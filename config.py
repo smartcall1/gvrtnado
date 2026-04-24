@@ -45,8 +45,8 @@ class Config:
         self.COOLDOWN_URGENT = int(os.getenv("COOLDOWN_URGENT", "10"))
 
         # ===== 손절/익절 설정 =====
-        self.SPREAD_EXIT_HOLD = float(os.getenv("SPREAD_EXIT_HOLD", "50"))  # bps
-        self.SPREAD_STOPLOSS = float(os.getenv("SPREAD_STOPLOSS", "-30"))  # bps
+        self.SPREAD_EXIT_HOLD = float(os.getenv("SPREAD_EXIT_HOLD", "50"))  # USD
+        self.SPREAD_STOPLOSS = float(os.getenv("SPREAD_STOPLOSS", "-30"))  # USD
         self.MAX_HOLD_DAYS = int(os.getenv("MAX_HOLD_DAYS", "4"))
 
         # ===== 모니터링 및 안전 설정 =====

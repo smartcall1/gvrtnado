@@ -146,6 +146,7 @@ class BotState:
     positions: dict = field(default_factory=dict)
     earn: dict = field(default_factory=dict)
     boost_config: dict = field(default_factory=dict)
+    exit_reason: str = ""
 
     def save(self, path: Path):
         d = {
@@ -163,6 +164,7 @@ class BotState:
             "positions": self.positions,
             "earn": self.earn,
             "boost_config": self.boost_config,
+            "exit_reason": self.exit_reason,
         }
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(d, indent=2))
@@ -187,6 +189,7 @@ class BotState:
             grvt_balance=d.get("grvt_balance", 0),
             positions=d.get("positions", {}),
             earn=d.get("earn", {}),
+            exit_reason=d.get("exit_reason", ""),
             boost_config=d.get("boost_config", {}),
         )
 
