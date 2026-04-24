@@ -1,0 +1,158 @@
+"""
+설정 관리 모듈
+
+환경변수에서 설정을 읽어 로드하고, 모드별 파라미터, 수수료 계산 등을 제공합니다.
+"""
+
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+class Config:
+    """
+    NADO×GRVT 델타 뉴트럴 아비트라지 봇의 설정을 관리하는 클래스.
+
+    환경변수에서 설정값을 읽고, 기본값을 제공하며, 검증 메서드를 포함합니다.
+    """
+
+    def __init__(self):
+        """환경변수에서 설정값을 읽어 초기화합니다."""
+
+        # ===== 필수 인증 정보 =====
+        self.NADO_PRIVATE_KEY = os.getenv("NADO_PRIVATE_KEY", "")
+        self.GRVT_API_KEY = os.getenv("GRVT_API_KEY", "")
+        self.GRVT_PRIVATE_KEY = os.getenv("GRVT_PRIVATE_KEY", "")
+        self.GRVT_TRADING_ACCOUNT_ID = os.getenv("GRVT_TRADING_ACCOUNT_ID", "")
+
+        # ===== 거래 기본 파라미터 =====
+        self.LEVERAGE = int(os.getenv("LEVERAGE", "5"))
+        self.PAIR_DEFAULT = os.getenv("PAIR_DEFAULT", "BTC")
+        self.EARN_TARGET_VOLUME = float(os.getenv("EARN_TARGET_VOLUME", "300000"))
+
+        # ===== HOLD 모드: 장기 보유 =====
+        self.MIN_HOLD_HOURS_HOLD = float(os.getenv("MIN_HOLD_HOURS_HOLD", "24"))
+        self.COOLDOWN_HOLD = int(os.getenv("COOLDOWN_HOLD", "10800"))  # 3시간 = 10800초
+
+        # ===== VOLUME 모드: 중기 수익 추구 =====
+        self.MIN_HOLD_HOURS_VOLUME = float(os.getenv("MIN_HOLD_HOURS_VOLUME", "2"))
+        self.COOLDOWN_VOLUME = int(os.getenv("COOLDOWN_VOLUME", "30"))
+
+        # ===== VOLUME_URGENT 모드: 단기 수익 추구 =====
+        self.MIN_HOLD_HOURS_URGENT = float(os.getenv("MIN_HOLD_HOURS_URGENT", "0.5"))
+        self.COOLDOWN_URGENT = int(os.getenv("COOLDOWN_URGENT", "10"))
+
+        # ===== 손절/익절 설정 =====
+        self.SPREAD_EXIT_HOLD = float(os.getenv("SPREAD_EXIT_HOLD", "50"))  # bps
+        self.SPREAD_STOPLOSS = float(os.getenv("SPREAD_STOPLOSS", "-30"))  # bps
+        self.MAX_HOLD_DAYS = int(os.getenv("MAX_HOLD_DAYS", "4"))
+
+        # ===== 모니터링 및 안전 설정 =====
+        self.POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "3"))  # 초
+        self.MARGIN_WARNING_PCT = float(os.getenv("MARGIN_WARNING_PCT", "15"))
+        self.MARGIN_EMERGENCY_PCT = float(os.getenv("MARGIN_EMERGENCY_PCT", "10"))
+        self.CIRCUIT_BREAKER_FAILS = int(os.getenv("CIRCUIT_BREAKER_FAILS", "5"))
+        self.PRICE_DIVERGENCE_WARN = float(os.getenv("PRICE_DIVERGENCE_WARN", "3"))
+        self.PRICE_DIVERGENCE_EMERGENCY = float(
+            os.getenv("PRICE_DIVERGENCE_EMERGENCY", "5")
+        )
+
+        # ===== 텔레그램 설정 =====
+        self.TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        self.TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+        # ===== 로깅 설정 =====
+        self.LOG_SIZE_MB = int(os.getenv("LOG_SIZE_MB", "5"))
+        self.LOG_COUNT = int(os.getenv("LOG_COUNT", "3"))
+        self.LOG_DIR = Path("logs")
+
+        # ===== 거래 실행 상세 설정 =====
+        self.ENTRY_CHUNKS = 5  # 진입 시 5개 청크로 분할 실행
+        self.EXIT_CHUNKS = 5  # 청산 시 5개 청크로 분할 실행
+        self.CHUNK_RETRY = 2  # 청크 재시도 횟수
+        self.CHUNK_WAIT = 30  # 청크 간 대기 시간 (초)
+        self.SLIPPAGE_PCT = 0.004  # 0.4% 슬리피지
+        self.EMERGENCY_SLIPPAGE_PCT = 0.01  # 긴급 상황 1% 슬리피지
+        self.MARGIN_BUFFER = 0.95  # 마진 버퍼 (유효마진의 95%)
+        self.POLL_BALANCE_SECONDS = 300  # 잔고 폴링 (5분)
+        self.POLL_FUNDING_SECONDS = 3600  # 펀딩 폴링 (1시간)
+
+        # ===== 펀딩레이트 설정 =====
+        self.NADO_FUNDING_PERIOD_H = 1  # NADO: 1시간마다 펀딩
+        self.GRVT_FUNDING_PERIOD_H = 8  # GRVT: 8시간마다 펀딩
+
+        # ===== 수수료 설정 (bps, basis points) =====
+        self.NADO_MAKER_FEE_BPS = 1.0  # NADO 메이커 수수료 1 bps
+        self.GRVT_MAKER_FEE_BPS = -0.01  # GRVT 메이커 리베이트 -0.01 bps
+
+    def validate(self) -> list[str]:
+        """
+        필수 환경변수가 모두 설정되었는지 검증합니다.
+
+        Returns:
+            list[str]: 검증 오류 메시지 리스트. 모두 설정되면 빈 리스트.
+        """
+        errors = []
+        required = {
+            "NADO_PRIVATE_KEY": self.NADO_PRIVATE_KEY,
+            "GRVT_API_KEY": self.GRVT_API_KEY,
+            "GRVT_PRIVATE_KEY": self.GRVT_PRIVATE_KEY,
+            "GRVT_TRADING_ACCOUNT_ID": self.GRVT_TRADING_ACCOUNT_ID,
+        }
+        for name, val in required.items():
+            if not val:
+                errors.append(f"{name} is not set")
+        return errors
+
+    def ensure_dirs(self):
+        """필요한 디렉토리를 생성합니다."""
+        self.LOG_DIR.mkdir(exist_ok=True)
+
+    def mode_params(self, mode: str) -> dict:
+        """
+        거래 모드별 파라미터를 반환합니다.
+
+        Args:
+            mode (str): 모드명 ('HOLD', 'VOLUME', 'VOLUME_URGENT')
+
+        Returns:
+            dict: 모드별 파라미터 (min_hold_hours, cooldown, spread_exit)
+
+        Raises:
+            KeyError: 존재하지 않는 모드인 경우
+        """
+        modes = {
+            "HOLD": {
+                "min_hold_hours": self.MIN_HOLD_HOURS_HOLD,
+                "cooldown": self.COOLDOWN_HOLD,
+                "spread_exit": self.SPREAD_EXIT_HOLD,
+            },
+            "VOLUME": {
+                "min_hold_hours": self.MIN_HOLD_HOURS_VOLUME,
+                "cooldown": self.COOLDOWN_VOLUME,
+                "spread_exit": 10.0,
+            },
+            "VOLUME_URGENT": {
+                "min_hold_hours": self.MIN_HOLD_HOURS_URGENT,
+                "cooldown": self.COOLDOWN_URGENT,
+                "spread_exit": 6.0,
+            },
+        }
+        return modes[mode]
+
+    def estimate_round_trip_fee(self, notional: float) -> float:
+        """
+        왕복 거래 수수료를 계산합니다 (진입 + 청산).
+
+        Args:
+            notional (float): 명목 거래액 (USD)
+
+        Returns:
+            float: 예상 왕복 수수료 (USD)
+        """
+        # 진입과 청산 각각 수수료 부과 (2×)
+        nado_fee = notional * 2 * (self.NADO_MAKER_FEE_BPS / 10_000)
+        grvt_fee = notional * 2 * (self.GRVT_MAKER_FEE_BPS / 10_000)
+        return nado_fee + grvt_fee
