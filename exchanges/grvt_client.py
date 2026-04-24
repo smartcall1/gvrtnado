@@ -144,7 +144,7 @@ class GrvtClient(BaseExchangeClient):
             result = await self._retry(
                 self._api.create_order,
                 grvt_sym, "limit", side.lower(), size, price,
-                {"post_only": True},
+                {},
             )
             if result:
                 status = result.get("status", "")

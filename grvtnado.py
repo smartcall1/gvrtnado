@@ -49,8 +49,11 @@ class DeltaNeutralBot:
             for k, v in self._state.positions.items():
                 try:
                     self._positions[k] = Position.from_dict(v)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Position deserialization failed for {k}: {e}")
+            if not self._positions and self._state.cycle_state in (CycleState.HOLD, CycleState.EXIT):
+                logger.warning("Position restore failed, will rely on recovery check")
+                self._state.positions = {}
         self._earn = self._init_earn()
         self._running = False
 
@@ -213,6 +216,7 @@ class DeltaNeutralBot:
             self._state.entered_at = time.time()
             self._state.cumulative_funding = 0.0
             self._state.cumulative_fees = self.cfg.estimate_round_trip_fee(notional)
+            self._last_funding_check = time.time()
             self._state.nado_balance = nado_bal
             self._state.grvt_balance = grvt_bal
             self._state.cycle_state = CycleState.HOLD
@@ -401,7 +405,6 @@ class DeltaNeutralBot:
         nado_filled_cost = 0.0
         grvt_filled_qty = 0.0
         grvt_filled_cost = 0.0
-        filled_notional = 0.0
 
         nado_depth = await self._nado.get_orderbook_depth(pair)
         grvt_depth = await self._grvt.get_orderbook_depth(pair)
@@ -435,7 +438,6 @@ class DeltaNeutralBot:
                     nado_filled_cost += nado_res.filled_size * nado_res.filled_price
                     grvt_filled_qty += grvt_res.filled_size
                     grvt_filled_cost += grvt_res.filled_size * grvt_res.filled_price
-                    filled_notional += (nado_res.filled_size * nado_res.filled_price + grvt_res.filled_size * grvt_res.filled_price) / 2
                     success = True
                     break
                 elif nado_ok and not grvt_ok:
@@ -470,21 +472,24 @@ class DeltaNeutralBot:
             if i < self.cfg.ENTRY_CHUNKS - 1:
                 await asyncio.sleep(chunk_wait)
 
-        if filled_notional > 0:
-            margin = filled_notional / self.cfg.LEVERAGE
+        nado_notional = nado_filled_cost
+        grvt_notional = grvt_filled_cost
+        if nado_notional > 0 or grvt_notional > 0:
             nado_vwap = nado_filled_cost / nado_filled_qty if nado_filled_qty > 0 else 0
             grvt_vwap = grvt_filled_cost / grvt_filled_qty if grvt_filled_qty > 0 else 0
+            nado_margin = nado_notional / self.cfg.LEVERAGE
+            grvt_margin = grvt_notional / self.cfg.LEVERAGE
             self._positions["nado"] = Position(
                 exchange="nado", symbol=pair,
                 side="LONG" if direction == "A" else "SHORT",
-                notional=filled_notional, entry_price=nado_vwap,
-                leverage=self.cfg.LEVERAGE, margin=margin,
+                notional=nado_notional, entry_price=nado_vwap,
+                leverage=self.cfg.LEVERAGE, margin=nado_margin,
             )
             self._positions["grvt"] = Position(
                 exchange="grvt", symbol=pair,
                 side="SHORT" if direction == "A" else "LONG",
-                notional=filled_notional, entry_price=grvt_vwap,
-                leverage=self.cfg.LEVERAGE, margin=margin,
+                notional=grvt_notional, entry_price=grvt_vwap,
+                leverage=self.cfg.LEVERAGE, margin=grvt_margin,
             )
             return True
         return False
@@ -497,18 +502,19 @@ class DeltaNeutralBot:
         grvt_pos = self._positions.get("grvt")
         chunks = self.cfg.EXIT_CHUNKS
 
+        nado_real = await self._nado.get_positions(pair)
+        grvt_real = await self._grvt.get_positions(pair)
+        nado_total_size = abs(float(nado_real[0].get("size", nado_real[0].get("amount", 0)))) if nado_real else 0
+        grvt_total_size = abs(float(grvt_real[0].get("size", grvt_real[0].get("contracts", 0)))) if grvt_real else 0
+
         for i in range(chunks):
             tasks = []
-            if nado_pos:
-                price = await self._nado.get_mark_price(pair)
-                if price:
-                    chunk_qty = (nado_pos.notional / chunks) / price
-                    tasks.append(self._nado.close_position(pair, nado_pos.side, chunk_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT))
-            if grvt_pos:
-                price = await self._grvt.get_mark_price(pair)
-                if price:
-                    chunk_qty = (grvt_pos.notional / chunks) / price
-                    tasks.append(self._grvt.close_position(pair, grvt_pos.side, chunk_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT))
+            if nado_pos and nado_total_size > 0:
+                chunk_qty = nado_total_size / chunks
+                tasks.append(self._nado.close_position(pair, nado_pos.side, chunk_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT))
+            if grvt_pos and grvt_total_size > 0:
+                chunk_qty = grvt_total_size / chunks
+                tasks.append(self._grvt.close_position(pair, grvt_pos.side, chunk_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT))
             if tasks:
                 await asyncio.gather(*tasks)
             if i < chunks - 1:
