@@ -108,8 +108,26 @@ class DeltaNeutralBot:
         mode = self._determine_current_mode()
         self._state.mode = OperatingMode(mode)
 
+        funding_spreads = {}
+        liquidities = {}
+        for pair in self._pair_mgr.common_pairs:
+            try:
+                nr = await self._nado.get_funding_rate(pair)
+                gr = await self._grvt.get_funding_rate(pair)
+                if nr is not None and gr is not None:
+                    n8 = normalize_funding_to_8h(nr, self.cfg.NADO_FUNDING_PERIOD_H)
+                    g8 = normalize_funding_to_8h(gr, self.cfg.GRVT_FUNDING_PERIOD_H)
+                    funding_spreads[pair] = abs(n8 - g8)
+                nd = await self._nado.get_orderbook_depth(pair)
+                gd = await self._grvt.get_orderbook_depth(pair)
+                liquidities[pair] = min(nd, gd) if nd and gd else 0
+            except Exception as e:
+                logger.debug(f"Pair scan {pair}: {e}")
+
         best_pair = self._pair_mgr.best_pair(
-            funding_spreads={}, liquidities={}, min_liquidity=0,
+            funding_spreads=funding_spreads,
+            liquidities=liquidities,
+            min_liquidity=self.cfg.MIN_NOTIONAL * 10,
         )
         self._state.pair = best_pair
         self._state.cycle_state = CycleState.ANALYZE
@@ -169,8 +187,18 @@ class DeltaNeutralBot:
         nado_bal = await self._nado.get_balance()
         grvt_bal = await self._grvt.get_balance()
         notional = calc_notional(nado_bal, grvt_bal, self.cfg.LEVERAGE, self.cfg.MARGIN_BUFFER)
-        if notional < 100:
-            logger.warning("Notional too small, skipping")
+
+        nado_depth = await self._nado.get_orderbook_depth(pair)
+        grvt_depth = await self._grvt.get_orderbook_depth(pair)
+        min_depth = min(nado_depth, grvt_depth) if nado_depth and grvt_depth else 0
+        if min_depth > 0:
+            liquidity_cap = min_depth * self.cfg.LIQUIDITY_CAP_PCT
+            if notional > liquidity_cap:
+                logger.info(f"Liquidity cap: ${notional:,.0f} → ${liquidity_cap:,.0f} (depth ${min_depth:,.0f})")
+                notional = liquidity_cap
+
+        if notional < self.cfg.MIN_NOTIONAL:
+            logger.warning(f"Notional ${notional:,.0f} below minimum, skipping")
             return
 
         success = await self._execute_enter(pair, direction, notional)
@@ -356,6 +384,11 @@ class DeltaNeutralBot:
         grvt_side = "SELL" if direction == "A" else "BUY"
         filled_notional = 0.0
 
+        nado_depth = await self._nado.get_orderbook_depth(pair)
+        grvt_depth = await self._grvt.get_orderbook_depth(pair)
+        min_depth = min(nado_depth, grvt_depth) if nado_depth and grvt_depth else float('inf')
+        chunk_wait = self.cfg.CHUNK_WAIT * 2 if min_depth < self.cfg.THIN_MARKET_DEPTH else self.cfg.CHUNK_WAIT
+
         for i in range(self.cfg.ENTRY_CHUNKS):
             nado_price = await self._nado.get_mark_price(pair)
             grvt_price = await self._grvt.get_mark_price(pair)
@@ -402,7 +435,7 @@ class DeltaNeutralBot:
                 break
 
             if i < self.cfg.ENTRY_CHUNKS - 1:
-                await asyncio.sleep(self.cfg.CHUNK_WAIT)
+                await asyncio.sleep(chunk_wait)
 
         if filled_notional > 0:
             margin = filled_notional / self.cfg.LEVERAGE

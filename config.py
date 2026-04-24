@@ -80,6 +80,10 @@ class Config:
         self.POLL_FUNDING_SECONDS = 3600  # 펀딩 폴링 (1시간)
 
         # ===== 펀딩레이트 설정 =====
+        self.LIQUIDITY_CAP_PCT = 0.10  # 오더북 depth의 최대 10%까지만 진입
+        self.THIN_MARKET_DEPTH = 500_000  # 이 이하면 얇은 시장 → 청크 대기 2배
+        self.MIN_NOTIONAL = 100  # 최소 진입 금액 (USD)
+
         self.NADO_FUNDING_PERIOD_H = 1  # NADO: 1시간마다 펀딩
         self.GRVT_FUNDING_PERIOD_H = 8  # GRVT: 8시간마다 펀딩
 
