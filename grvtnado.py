@@ -39,7 +39,7 @@ def main():
         try:
             proc = subprocess.run(
                 [sys.executable, "-u", "-c",
-                 "import asyncio; from bot_core import DeltaNeutralBot; asyncio.run(DeltaNeutralBot().run())"],
+                 "import asyncio; from nado_grvt_engine import DeltaNeutralBot; asyncio.run(DeltaNeutralBot().run())"],
                 timeout=None,
             )
             if proc.returncode == 0:
