@@ -1,6 +1,7 @@
 # exchanges/grvt_client.py
 import asyncio
 import logging
+import time
 from typing import Optional
 
 from exchanges.base_client import BaseExchangeClient, OrderResult
@@ -37,30 +38,37 @@ class GrvtClient(BaseExchangeClient):
     async def connect(self):
         try:
             from pysdk.grvt_ccxt_ws import GrvtCcxtWS
+            from pysdk.grvt_ccxt_env import GrvtEnv
+
+            loop = asyncio.get_running_loop()
             self._api = GrvtCcxtWS(
-                env="prod",
-                private_key=self._private_key,
-                trading_account_id=self._account_id,
-                api_key=self._api_key,
+                env=GrvtEnv.PROD,
+                loop=loop,
+                parameters={
+                    "private_key": self._private_key,
+                    "api_key": self._api_key,
+                    "trading_account_id": self._account_id,
+                },
             )
-            await asyncio.to_thread(self._api.login)
-            logger.info("GRVT connected and logged in")
+            logger.info("GRVT connected")
         except ImportError:
-            logger.error("grvt-pysdk not installed. Run: pip install grvt-pysdk (module: pysdk)")
+            logger.error("grvt-pysdk not installed. Run: pip install grvt-pysdk")
             raise
 
     async def close(self):
         if self._api:
             try:
-                await asyncio.to_thread(self._api.close)
+                session = getattr(self._api, '_session', None)
+                if session and not session.closed:
+                    await session.close()
             except Exception:
                 pass
             self._api = None
 
-    async def _retry(self, fn, *args, max_retries=3, **kwargs):
+    async def _retry(self, coro_fn, *args, max_retries=3, **kwargs):
         for attempt in range(max_retries):
             try:
-                return await asyncio.to_thread(fn, *args, **kwargs)
+                return await coro_fn(*args, **kwargs)
             except Exception as e:
                 logger.warning(f"GRVT retry {attempt+1}/{max_retries}: {e}")
                 if attempt < max_retries - 1:
@@ -101,7 +109,6 @@ class GrvtClient(BaseExchangeClient):
         return []
 
     async def get_mark_price(self, symbol: str) -> Optional[float]:
-        import time
         cached = self._ws_prices.get(symbol)
         cached_ts = self._ws_prices_ts.get(symbol, 0)
         if cached and (time.time() - cached_ts) < self._price_cache_ttl:
@@ -121,17 +128,11 @@ class GrvtClient(BaseExchangeClient):
     async def get_funding_rate(self, symbol: str) -> Optional[float]:
         try:
             grvt_sym = self._grvt_symbol(symbol)
-            try:
-                result = await self._retry(self._api.fetch_funding_rate, grvt_sym)
-                if result:
-                    rate = result.get("fundingRate")
-                    if rate is not None:
-                        return float(rate)
-            except (AttributeError, Exception) as e:
-                logger.debug(f"GRVT fetch_funding_rate fallback: {e}")
-            result = await self._retry(self._api.fetch_funding_rate_history, grvt_sym, None, 1)
+            result = await self._retry(self._api.fetch_funding_rate_history, grvt_sym, 0, 1)
             if result and len(result) > 0:
-                return float(result[0].get("fundingRate", 0))
+                rate = result[0].get("fundingRate")
+                if rate is not None:
+                    return float(rate)
         except Exception as e:
             logger.error(f"GRVT get_funding_rate: {e}")
         return None
@@ -183,8 +184,8 @@ class GrvtClient(BaseExchangeClient):
 
     async def cancel_all_orders(self, symbol: str) -> bool:
         try:
-            grvt_sym = self._grvt_symbol(symbol)
-            await self._retry(self._api.cancel_all_orders, grvt_sym)
+            base = symbol.upper()
+            await self._retry(self._api.cancel_all_orders, {"kind": "PERPETUAL", "base": base})
             return True
         except Exception as e:
             logger.error(f"GRVT cancel_all_orders: {e}")
@@ -213,8 +214,8 @@ class GrvtClient(BaseExchangeClient):
             grvt_sym = self._grvt_symbol(symbol)
             book = await self._retry(self._api.fetch_order_book, grvt_sym, 10)
             if book:
-                bid_depth = sum(b[1] for b in book.get("bids", []))
-                ask_depth = sum(a[1] for a in book.get("asks", []))
+                bid_depth = sum(float(b[1]) for b in book.get("bids", []))
+                ask_depth = sum(float(a[1]) for a in book.get("asks", []))
                 mark = await self.get_mark_price(symbol) or 0
                 return (bid_depth + ask_depth) * mark
         except Exception as e:
