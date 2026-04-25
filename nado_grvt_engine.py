@@ -511,11 +511,24 @@ class DeltaNeutralBot:
             nado_eff_lev = min(self.cfg.LEVERAGE, nado_max_lev)
             for attempt in range(self.cfg.CHUNK_RETRY):
                 nado_margin = chunk_size / nado_eff_lev
-                nado_res, grvt_res = await asyncio.gather(
-                    self._nado.place_limit_order(pair, nado_side, nado_qty, nado_order_price, isolated_margin=nado_margin),
-                    self._grvt.place_limit_order(pair, grvt_side, grvt_qty, grvt_order_price),
+
+                # NADO 먼저 체결 — OI cap/마진 실패 시 GRVT 롤백 비용 회피
+                nado_res = await self._nado.place_limit_order(
+                    pair, nado_side, nado_qty, nado_order_price, isolated_margin=nado_margin,
                 )
                 nado_ok = nado_res.status in ("filled", "matched")
+
+                if not nado_ok:
+                    logger.warning(f"Chunk {i+1}: NADO failed ({nado_res.message}), skipping GRVT")
+                    await self._nado.cancel_all_orders(pair)
+                    if attempt < self.cfg.CHUNK_RETRY - 1:
+                        await asyncio.sleep(5)
+                    continue
+
+                # NADO 성공 → GRVT 진입
+                grvt_res = await self._grvt.place_limit_order(
+                    pair, grvt_side, grvt_qty, grvt_order_price,
+                )
                 grvt_ok = grvt_res.status in ("filled", "closed")
 
                 if nado_ok and grvt_ok:
@@ -534,18 +547,6 @@ class DeltaNeutralBot:
                     if not rollback_ok:
                         logger.critical(f"Chunk {i+1}: NADO rollback FAILED")
                         await self._telegram.send_alert(f"[🚨 ROLLBACK FAIL] NADO {pair} 수동 확인 필요")
-                elif grvt_ok and not nado_ok:
-                    logger.warning(f"Chunk {i+1}: NADO failed, rolling back GRVT")
-                    rollback_ok = await self._grvt.close_position(
-                        pair, grvt_pos_side, grvt_res.filled_size, self.cfg.EMERGENCY_SLIPPAGE_PCT,
-                    )
-                    await self._nado.cancel_all_orders(pair)
-                    if not rollback_ok:
-                        logger.critical(f"Chunk {i+1}: GRVT rollback FAILED")
-                        await self._telegram.send_alert(f"[🚨 ROLLBACK FAIL] GRVT {pair} 수동 확인 필요")
-                else:
-                    await self._nado.cancel_all_orders(pair)
-                    await self._grvt.cancel_all_orders(pair)
 
                 if attempt < self.cfg.CHUNK_RETRY - 1:
                     await asyncio.sleep(5)
