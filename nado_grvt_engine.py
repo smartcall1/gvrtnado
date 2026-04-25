@@ -155,11 +155,13 @@ class DeltaNeutralBot:
         grvt_rate = await self._grvt.get_funding_rate(pair)
 
         if nado_rate is None or grvt_rate is None:
+            logger.info(f"[ANALYZE] {pair} funding: NADO={nado_rate} GRVT={grvt_rate} — skipping (None)")
             return
 
         nado_8h = normalize_funding_to_8h(nado_rate, self.cfg.NADO_FUNDING_PERIOD_H)
         grvt_8h = normalize_funding_to_8h(grvt_rate, self.cfg.GRVT_FUNDING_PERIOD_H)
         direction = decide_direction(nado_8h, grvt_8h)
+        logger.info(f"[ANALYZE] {pair} NADO_8h={nado_8h:.6f} GRVT_8h={grvt_8h:.6f} dir={direction}")
 
         if direction is None:
             mode = self._state.mode
@@ -190,9 +192,12 @@ class DeltaNeutralBot:
         self._nado_price = await self._nado.get_mark_price(pair)
         self._grvt_price = await self._grvt.get_mark_price(pair)
         if not self._nado_price or not self._grvt_price:
+            logger.info(f"[ENTER] {pair} prices: NADO={self._nado_price} GRVT={self._grvt_price} — skipping (None)")
             return
 
-        if not is_entry_favorable(direction, self._nado_price, self._grvt_price):
+        favorable = is_entry_favorable(direction, self._nado_price, self._grvt_price)
+        logger.info(f"[ENTER] {pair} dir={direction} NADO=${self._nado_price:.1f} GRVT=${self._grvt_price:.1f} favorable={favorable}")
+        if not favorable:
             mode = self._state.mode
             if mode != OperatingMode.VOLUME_URGENT:
                 return
@@ -203,6 +208,7 @@ class DeltaNeutralBot:
         nado_bal = await self._nado.get_balance()
         grvt_bal = await self._grvt.get_balance()
         notional = calc_notional(nado_bal, grvt_bal, self.cfg.LEVERAGE, self.cfg.MARGIN_BUFFER)
+        logger.info(f"[ENTER] balance NADO=${nado_bal:.2f} GRVT=${grvt_bal:.2f} notional=${notional:.0f}")
 
         nado_depth = await self._nado.get_orderbook_depth(pair)
         grvt_depth = await self._grvt.get_orderbook_depth(pair)
