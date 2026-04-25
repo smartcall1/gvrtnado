@@ -225,8 +225,10 @@ class DeltaNeutralBot:
 
         nado_bal = await self._nado.get_balance()
         grvt_bal = await self._grvt.get_balance()
-        notional = calc_notional(nado_bal, grvt_bal, self.cfg.LEVERAGE, self.cfg.MARGIN_BUFFER)
-        logger.info(f"[ENTER] balance NADO=${nado_bal:.2f} GRVT=${grvt_bal:.2f} notional=${notional:.0f}")
+        nado_max_lev = self._nado.get_max_leverage(pair)
+        effective_lev = min(self.cfg.LEVERAGE, nado_max_lev)
+        notional = calc_notional(nado_bal, grvt_bal, effective_lev, self.cfg.MARGIN_BUFFER)
+        logger.info(f"[ENTER] balance NADO=${nado_bal:.2f} GRVT=${grvt_bal:.2f} notional=${notional:.0f} (NADO max_lev={nado_max_lev:.1f}x, eff={effective_lev:.1f}x)")
 
         nado_depth = await self._nado.get_orderbook_depth(pair)
         grvt_depth = await self._grvt.get_orderbook_depth(pair)
@@ -241,8 +243,17 @@ class DeltaNeutralBot:
             logger.warning(f"Notional ${notional:,.0f} below minimum, skipping")
             return
 
-        success = await self._execute_enter(pair, direction, notional)
-        if success:
+        result = await self._execute_enter(pair, direction, notional)
+
+        if result == "nado_health":
+            reduced = notional * 0.4
+            if reduced >= self.cfg.MIN_NOTIONAL:
+                logger.info(f"[ENTER] NADO 마진 부족, notional ${notional:.0f} → ${reduced:.0f} 줄여 재시도")
+                await self._telegram.send_alert(f"[⚠️ MARGIN] NADO {pair} 마진 부족 — notional ${notional:.0f}→${reduced:.0f} 재시도")
+                result = await self._execute_enter(pair, direction, reduced)
+                notional = reduced
+
+        if result == "ok":
             self._state.cycle_id = str(uuid.uuid4())[:8]
             self._state.entered_at = time.time()
             self._state.cumulative_funding = 0.0
@@ -436,13 +447,13 @@ class DeltaNeutralBot:
 
     # --- 청크 진입/퇴출 ---
 
-    async def _execute_enter(self, pair: str, direction: str, notional: float) -> bool:
+    async def _execute_enter(self, pair: str, direction: str, notional: float) -> str:
         lev_ok = await self._grvt.set_leverage(pair, self.cfg.LEVERAGE)
         if not lev_ok:
             await self._telegram.send_alert(
                 f"[⚠️ LEVERAGE] GRVT {pair} 레버리지를 {self.cfg.LEVERAGE}x로 웹UI에서 설정해주세요"
             )
-            return False
+            return "failed"
 
         chunk_size = notional / self.cfg.ENTRY_CHUNKS
         nado_side = "BUY" if direction == "A" else "SELL"
@@ -459,6 +470,7 @@ class DeltaNeutralBot:
         grvt_depth = await self._grvt.get_orderbook_depth(pair)
         min_depth = min(nado_depth, grvt_depth) if nado_depth and grvt_depth else float('inf')
         chunk_wait = self.cfg.CHUNK_WAIT * 2 if min_depth < self.cfg.THIN_MARKET_DEPTH else self.cfg.CHUNK_WAIT
+        nado_health_fail = False
 
         for i in range(self.cfg.ENTRY_CHUNKS):
             nado_price = await self._nado.get_mark_price(pair)
@@ -474,8 +486,10 @@ class DeltaNeutralBot:
             grvt_order_price = grvt_price * (1 - slip) if grvt_side == "SELL" else grvt_price * (1 + slip)
 
             success = False
+            nado_max_lev = self._nado.get_max_leverage(pair)
+            nado_eff_lev = min(self.cfg.LEVERAGE, nado_max_lev)
             for attempt in range(self.cfg.CHUNK_RETRY):
-                nado_margin = chunk_size / self.cfg.LEVERAGE
+                nado_margin = chunk_size / nado_eff_lev
                 nado_res, grvt_res = await asyncio.gather(
                     self._nado.place_limit_order(pair, nado_side, nado_qty, nado_order_price, isolated_margin=nado_margin),
                     self._grvt.place_limit_order(pair, grvt_side, grvt_qty, grvt_order_price),
@@ -516,7 +530,9 @@ class DeltaNeutralBot:
                     await asyncio.sleep(5)
 
             if not success:
-                logger.error(f"Chunk {i+1}/{self.cfg.ENTRY_CHUNKS} failed after retries")
+                if "nado_health" in (nado_res.message or ""):
+                    nado_health_fail = True
+                logger.error(f"Chunk {i+1}/{self.cfg.ENTRY_CHUNKS} failed after retries{' (nado_health)' if nado_health_fail else ''}")
                 break
 
             if i < self.cfg.ENTRY_CHUNKS - 1:
@@ -536,15 +552,15 @@ class DeltaNeutralBot:
                     self._nado.close_position(pair, nado_pos_side, nado_filled_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT),
                     self._grvt.close_position(pair, grvt_pos_side, grvt_filled_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT),
                 )
-                return False
+                return "failed"
         elif nado_notional > 0 and grvt_notional == 0:
             logger.warning("Only NADO filled, GRVT empty — rolling back NADO")
             await self._nado.close_position(pair, nado_pos_side, nado_filled_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT)
-            return False
+            return "failed"
         elif grvt_notional > 0 and nado_notional == 0:
             logger.warning("Only GRVT filled, NADO empty — rolling back GRVT")
             await self._grvt.close_position(pair, grvt_pos_side, grvt_filled_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT)
-            return False
+            return "nado_health" if nado_health_fail else "failed"
 
         if nado_notional > 0 and grvt_notional > 0:
             nado_vwap = nado_filled_cost / nado_filled_qty if nado_filled_qty > 0 else 0
@@ -563,8 +579,8 @@ class DeltaNeutralBot:
                 notional=grvt_notional, entry_price=grvt_vwap,
                 leverage=self.cfg.LEVERAGE, margin=grvt_margin,
             )
-            return True
-        return False
+            return "ok"
+        return "nado_health" if nado_health_fail else "failed"
 
     async def _execute_exit(self, pair: str) -> bool:
         if not self._positions:

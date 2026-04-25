@@ -73,14 +73,32 @@ class NadoClient(BaseExchangeClient):
             products = await asyncio.to_thread(self._client.market.get_all_engine_markets)
             if products and hasattr(products, "perp_products"):
                 for p in products.perp_products:
+                    long_w = int(p.risk.long_weight_initial_x18) / 1e18
+                    short_w = int(p.risk.short_weight_initial_x18) / 1e18
+                    long_ml = 1 / (1 - long_w) if long_w < 1 else 100
+                    short_ml = 1 / abs(short_w - 1) if abs(short_w - 1) > 0.001 else 100
+                    max_lev = min(long_ml, short_ml)
                     self._increments[p.product_id] = {
                         "price_x18": int(p.book_info.price_increment_x18),
                         "size": int(p.book_info.size_increment),
                         "min_size": int(p.book_info.min_size),
+                        "max_leverage": max_lev,
                     }
                 logger.info(f"NADO loaded increments for {len(self._increments)} perp products")
+                lev_summary = {
+                    sym: f"{self._increments[pid]['max_leverage']:.1f}x"
+                    for sym, pid in self._symbol_map.items()
+                    if pid in self._increments
+                }
+                logger.info(f"NADO max leverage: {lev_summary}")
         except Exception as e:
             logger.warning(f"Failed to load NADO increments: {e}")
+
+    def get_max_leverage(self, symbol: str) -> float:
+        pid = self._symbol_map.get(symbol.upper())
+        if pid and pid in self._increments:
+            return self._increments[pid].get("max_leverage", 5)
+        return 5
 
     def _product_id(self, symbol: str) -> int:
         pid = self._symbol_map.get(symbol.upper())
@@ -204,15 +222,28 @@ class NadoClient(BaseExchangeClient):
             except Exception as cross_err:
                 if "2122" in str(cross_err):
                     logger.info(f"NADO {symbol}: isolated-only market, retrying with isolated mode")
-                    if isolated_margin > 0:
-                        margin_x18 = int(Decimal(str(isolated_margin)) * 10**18)
-                        margin_x18 = margin_x18 - margin_x18 % size_inc if size_inc else margin_x18
-                        appendix = build_appendix(OrderType.DEFAULT, isolated=True, isolated_margin=margin_x18)
-                    else:
-                        appendix = build_appendix(OrderType.DEFAULT, isolated=True)
-                    result = await asyncio.to_thread(
-                        self._client.market.place_order, _build_params(_build_order(appendix))
-                    )
+                    result = None
+                    for _margin_mult in [1, 2, 3]:
+                        try:
+                            if isolated_margin > 0:
+                                actual_margin = isolated_margin * _margin_mult
+                                margin_x6 = int(Decimal(str(actual_margin)) * 10**6)
+                                appendix = build_appendix(OrderType.DEFAULT, isolated=True, isolated_margin=margin_x6)
+                            else:
+                                appendix = build_appendix(OrderType.DEFAULT, isolated=True)
+                                if _margin_mult > 1:
+                                    break
+                            result = await asyncio.to_thread(
+                                self._client.market.place_order, _build_params(_build_order(appendix))
+                            )
+                            if _margin_mult > 1:
+                                logger.info(f"NADO {symbol}: succeeded with {_margin_mult}x margin")
+                            break
+                        except Exception as iso_err:
+                            if "2006" in str(iso_err) and _margin_mult < 3:
+                                logger.warning(f"NADO {symbol}: margin {_margin_mult}x insufficient (2006), trying {_margin_mult+1}x")
+                                continue
+                            raise
                 else:
                     raise
 
@@ -228,7 +259,9 @@ class NadoClient(BaseExchangeClient):
                     filled_price=price,
                 )
         except Exception as e:
-            logger.error(f"NADO place_limit_order: {e}")
+            err_str = str(e)
+            logger.error(f"NADO place_limit_order: {err_str}")
+            return OrderResult(order_id="", status="error", message="nado_health" if "2006" in err_str else "order failed")
         return OrderResult(order_id="", status="error", message="order failed")
 
     async def close_position(
