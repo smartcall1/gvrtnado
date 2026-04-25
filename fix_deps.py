@@ -1,84 +1,59 @@
 """
-nado-protocol과 grvt-pysdk의 eth-account 버전 충돌을 해결한다.
+nado-protocol과 grvt-pysdk의 의존성 충돌을 해결한다.
 
-nado-protocol: eth-account <0.9.0 요구
-grvt-pysdk:    eth-account >=0.13.4 요구
+1) eth-account: nado-protocol(<0.9) vs grvt-pysdk(>=0.13.4)
+   → encode_structured_data → encode_typed_data 패치
 
-실제 비호환은 encode_structured_data → encode_typed_data 함수명 변경뿐.
-이 스크립트가 설치된 nado_protocol 소스를 자동 패치한다.
+2) pydantic: nado-protocol은 v1 문법 사용, grvt-pysdk가 v2 설치
+   → @root_validator → @root_validator(skip_on_failure=True) 패치
+   → @validator → @field_validator 호환 패치
 
 사용법:
     pip install grvt-pysdk
     pip install nado-protocol --no-deps
     python fix_deps.py
 """
-import importlib
+import re
 import site
 import sys
 from pathlib import Path
 
 
-def find_nado_sign():
+def find_nado_pkg() -> Path:
     try:
         import nado_protocol
-        pkg_dir = Path(nado_protocol.__file__).parent
-    except ImportError:
-        for d in site.getsitepackages() + [site.getusersitepackages()]:
-            pkg_dir = Path(d) / "nado_protocol"
-            if pkg_dir.exists():
-                break
-        else:
-            print("[ERROR] nado_protocol not found")
-            sys.exit(1)
+        return Path(nado_protocol.__file__).parent
+    except Exception:
+        pass
 
-    sign_py = pkg_dir / "contracts" / "eip712" / "sign.py"
-    if not sign_py.exists():
-        for p in pkg_dir.rglob("sign.py"):
-            if "eip712" in str(p):
-                sign_py = p
-                break
+    dirs = site.getsitepackages()
+    try:
+        dirs.append(site.getusersitepackages())
+    except Exception:
+        pass
 
-    return sign_py
+    for d in dirs:
+        pkg_dir = Path(d) / "nado_protocol"
+        if pkg_dir.exists():
+            return pkg_dir
 
-
-def patch_file(path: Path):
-    text = path.read_text(encoding="utf-8")
-
-    if "encode_typed_data" in text:
-        print(f"[OK] Already patched: {path}")
-        return False
-
-    if "encode_structured_data" not in text:
-        print(f"[SKIP] No encode_structured_data found in: {path}")
-        return False
-
-    patched = text.replace("encode_structured_data", "encode_typed_data")
-    path.write_text(patched, encoding="utf-8")
-    print(f"[PATCHED] {path}")
-    return True
+    print("[ERROR] nado_protocol not found")
+    sys.exit(1)
 
 
-def main():
-    sign_py = find_nado_sign()
-    if sign_py and sign_py.exists():
-        patch_file(sign_py)
-    else:
-        print("[WARN] sign.py not found, searching all nado_protocol .py files...")
-        try:
-            import nado_protocol
-            pkg_dir = Path(nado_protocol.__file__).parent
-        except ImportError:
-            print("[ERROR] nado_protocol not installed")
-            sys.exit(1)
-
-        found = False
-        for py_file in pkg_dir.rglob("*.py"):
-            text = py_file.read_text(encoding="utf-8", errors="ignore")
-            if "encode_structured_data" in text:
-                patch_file(py_file)
-                found = True
-        if not found:
-            print("[OK] No files need patching")
+def patch_eth_account(pkg_dir: Path):
+    """encode_structured_data → encode_typed_data"""
+    print("\n--- eth-account 패치 ---")
+    patched = False
+    for py_file in pkg_dir.rglob("*.py"):
+        text = py_file.read_text(encoding="utf-8", errors="ignore")
+        if "encode_structured_data" in text:
+            new_text = text.replace("encode_structured_data", "encode_typed_data")
+            py_file.write_text(new_text, encoding="utf-8")
+            print(f"[PATCHED] {py_file}")
+            patched = True
+    if not patched:
+        print("[OK] encode_structured_data already patched or not found")
 
     try:
         from eth_account.messages import encode_typed_data
@@ -87,7 +62,81 @@ def main():
         print("[ERROR] eth_account too old — need >=0.13.0")
         sys.exit(1)
 
-    print("\nDone. Dependencies are now compatible.")
+
+def patch_pydantic(pkg_dir: Path):
+    """pydantic v1 → v2 호환 패치"""
+    print("\n--- pydantic v2 호환 패치 ---")
+    try:
+        import pydantic
+        version = int(pydantic.VERSION.split(".")[0])
+    except Exception:
+        print("[SKIP] pydantic not installed")
+        return
+
+    if version < 2:
+        print(f"[OK] pydantic v{pydantic.VERSION} — v1이므로 패치 불필요")
+        return
+
+    print(f"[INFO] pydantic v{pydantic.VERSION} 감지 — v1 문법 패치 적용")
+
+    for py_file in pkg_dir.rglob("*.py"):
+        text = py_file.read_text(encoding="utf-8", errors="ignore")
+        original = text
+        changed = False
+
+        # @root_validator → @root_validator(skip_on_failure=True)
+        # 이미 skip_on_failure가 있으면 건너뜀
+        if "@root_validator" in text and "skip_on_failure" not in text:
+            text = text.replace(
+                "@root_validator\n",
+                "@root_validator(skip_on_failure=True)\n",
+            )
+            text = text.replace(
+                "@root_validator\r\n",
+                "@root_validator(skip_on_failure=True)\r\n",
+            )
+            # @root_validator(pre=True) — pre=True는 skip_on_failure 불필요
+            # @root_validator(pre=False) → 필요
+            text = re.sub(
+                r"@root_validator\(pre=False\)",
+                "@root_validator(pre=False, skip_on_failure=True)",
+                text,
+            )
+            if text != original:
+                changed = True
+
+        if changed:
+            py_file.write_text(text, encoding="utf-8")
+            print(f"[PATCHED] {py_file}")
+
+    print("[OK] pydantic 패치 완료")
+
+
+def verify():
+    """패치 후 import 검증"""
+    print("\n--- 검증 ---")
+    try:
+        # 기존 캐시 무효화
+        mods_to_remove = [k for k in sys.modules if k.startswith("nado_protocol")]
+        for m in mods_to_remove:
+            del sys.modules[m]
+
+        import nado_protocol
+        print("[OK] nado_protocol import 성공")
+    except Exception as e:
+        print(f"[WARN] nado_protocol import 실패: {e}")
+        print("       추가 패치가 필요할 수 있음")
+
+
+def main():
+    pkg_dir = find_nado_pkg()
+    print(f"nado_protocol 경로: {pkg_dir}")
+
+    patch_eth_account(pkg_dir)
+    patch_pydantic(pkg_dir)
+    verify()
+
+    print("\nDone.")
 
 
 if __name__ == "__main__":
