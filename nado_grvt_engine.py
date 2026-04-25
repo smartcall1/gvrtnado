@@ -846,41 +846,44 @@ class DeltaNeutralBot:
         await self._recovery_check()
 
         self._last_status_log = 0.0
-        while self._running:
-            try:
-                await self._telegram.poll_updates()
-                await self._run_state_machine()
+        try:
+            while self._running:
+                try:
+                    await self._telegram.poll_updates()
+                    await self._run_state_machine()
 
-                now = time.time()
-                if now - self._last_balance_check > self.cfg.POLL_BALANCE_SECONDS:
-                    self._last_balance_check = now
-                    self._state.nado_balance = await self._nado.get_balance()
-                    self._state.grvt_balance = await self._grvt.get_balance()
+                    now = time.time()
+                    if now - self._last_balance_check > self.cfg.POLL_BALANCE_SECONDS:
+                        self._last_balance_check = now
+                        self._state.nado_balance = await self._nado.get_balance()
+                        self._state.grvt_balance = await self._grvt.get_balance()
 
-                if now - self._last_status_log > 60:
-                    self._last_status_log = now
-                    pos_str = ""
-                    if self._positions:
-                        parts = []
-                        for k, p in self._positions.items():
-                            parts.append(f"{k}:{p.side}/${p.notional:.0f}@{p.entry_price:.1f}")
-                        pos_str = " | ".join(parts)
-                    else:
-                        pos_str = "none"
-                    logger.info(
-                        f"[STATUS] {self._state.cycle_state.value} | "
-                        f"mode={self._state.mode.value} | pair={self._state.pair} | "
-                        f"NADO=${self._state.nado_balance:.2f} GRVT=${self._state.grvt_balance:.2f} | "
-                        f"pos={pos_str}"
-                    )
+                    if now - self._last_status_log > 60:
+                        self._last_status_log = now
+                        pos_str = ""
+                        if self._positions:
+                            parts = []
+                            for k, p in self._positions.items():
+                                parts.append(f"{k}:{p.side}/${p.notional:.0f}@{p.entry_price:.1f}")
+                            pos_str = " | ".join(parts)
+                        else:
+                            pos_str = "none"
+                        logger.info(
+                            f"[STATUS] {self._state.cycle_state.value} | "
+                            f"mode={self._state.mode.value} | pair={self._state.pair} | "
+                            f"NADO=${self._state.nado_balance:.2f} GRVT=${self._state.grvt_balance:.2f} | "
+                            f"pos={pos_str}"
+                        )
 
-                await self._send_daily_report()
+                    await self._send_daily_report()
 
-            except Exception as e:
-                logger.error(f"Main loop error: {e}", exc_info=True)
+                except Exception as e:
+                    logger.error(f"Main loop error: {e}", exc_info=True)
 
-            await asyncio.sleep(self.cfg.POLL_INTERVAL)
-
-        await self._nado.close()
-        await self._grvt.close()
-        await self._telegram.close()
+                await asyncio.sleep(self.cfg.POLL_INTERVAL)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            logger.info("Shutting down...")
+        finally:
+            await self._nado.close()
+            await self._grvt.close()
+            await self._telegram.close()
