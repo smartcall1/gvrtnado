@@ -539,7 +539,7 @@ class DeltaNeutralBot:
                     success = True
                     break
                 elif nado_ok and not grvt_ok:
-                    logger.warning(f"Chunk {i+1}: GRVT failed, rolling back NADO")
+                    logger.warning(f"Chunk {i+1}: GRVT failed (status={grvt_res.status}, msg={grvt_res.message}), rolling back NADO")
                     rollback_ok = await self._nado.close_position(
                         pair, nado_pos_side, nado_res.filled_size, self.cfg.EMERGENCY_SLIPPAGE_PCT,
                     )

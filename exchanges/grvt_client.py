@@ -171,12 +171,32 @@ class GrvtClient(BaseExchangeClient):
             )
             if result:
                 status = result.get("status", "")
+                order_id = str(result.get("id", ""))
+                filled = float(result.get("filled", 0))
+
+                if status == "open" and filled == 0 and order_id:
+                    logger.info(f"GRVT {symbol} order {order_id} status=open, waiting for fill...")
+                    await asyncio.sleep(3)
+                    try:
+                        order_info = await self._retry(self._api.fetch_order, order_id, grvt_sym)
+                        if order_info:
+                            status = order_info.get("status", status)
+                            filled = float(order_info.get("filled", filled))
+                            logger.info(f"GRVT {symbol} order {order_id} polled: status={status}, filled={filled}")
+                    except Exception as poll_err:
+                        logger.warning(f"GRVT {symbol} order poll failed: {poll_err}")
+
+                if status not in ("closed", "filled") and filled <= 0:
+                    logger.warning(f"GRVT {symbol} order status={status}, result={result}")
                 return OrderResult(
-                    order_id=str(result.get("id", "")),
-                    status="filled" if status in ("closed", "filled") else status,
-                    filled_size=float(result.get("filled", 0)),
+                    order_id=order_id,
+                    status="filled" if status in ("closed", "filled") or filled > 0 else status,
+                    filled_size=filled if filled > 0 else size,
                     filled_price=float(result.get("average", price)),
+                    message=f"grvt_status={status}",
                 )
+            else:
+                logger.warning(f"GRVT {symbol} create_order returned None/empty")
         except Exception as e:
             logger.error(f"GRVT place_limit_order: {e}")
         return OrderResult(order_id="", status="error", message="order failed")
