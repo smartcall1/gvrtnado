@@ -40,7 +40,7 @@ class BaseExchangeClient(ABC):
 
     @abstractmethod
     async def place_limit_order(
-        self, symbol: str, side: str, size: float, price: float,
+        self, symbol: str, side: str, size: float, price: float, **kwargs,
     ) -> OrderResult:
         """Place limit/maker order. side: 'BUY' or 'SELL'."""
 

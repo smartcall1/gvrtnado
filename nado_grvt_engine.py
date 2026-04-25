@@ -436,7 +436,12 @@ class DeltaNeutralBot:
     # --- 청크 진입/퇴출 ---
 
     async def _execute_enter(self, pair: str, direction: str, notional: float) -> bool:
-        await self._grvt.set_leverage(pair, self.cfg.LEVERAGE)
+        lev_ok = await self._grvt.set_leverage(pair, self.cfg.LEVERAGE)
+        if not lev_ok:
+            await self._telegram.send_alert(
+                f"[⚠️ LEVERAGE] GRVT {pair} 레버리지를 {self.cfg.LEVERAGE}x로 웹UI에서 설정해주세요"
+            )
+            return False
 
         chunk_size = notional / self.cfg.ENTRY_CHUNKS
         nado_side = "BUY" if direction == "A" else "SELL"
@@ -469,8 +474,9 @@ class DeltaNeutralBot:
 
             success = False
             for attempt in range(self.cfg.CHUNK_RETRY):
+                nado_margin = chunk_size / self.cfg.LEVERAGE
                 nado_res, grvt_res = await asyncio.gather(
-                    self._nado.place_limit_order(pair, nado_side, nado_qty, nado_order_price),
+                    self._nado.place_limit_order(pair, nado_side, nado_qty, nado_order_price, isolated_margin=nado_margin),
                     self._grvt.place_limit_order(pair, grvt_side, grvt_qty, grvt_order_price),
                 )
                 nado_ok = nado_res.status in ("filled", "matched")

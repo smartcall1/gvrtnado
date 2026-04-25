@@ -158,6 +158,7 @@ class NadoClient(BaseExchangeClient):
 
     async def place_limit_order(
         self, symbol: str, side: str, size: float, price: float,
+        isolated_margin: float = 0,
     ) -> OrderResult:
         try:
             from nado_protocol.utils.nonce import gen_order_nonce
@@ -179,13 +180,20 @@ class NadoClient(BaseExchangeClient):
             if side.upper() != "BUY":
                 amount_x18 = -amount_x18
 
+            if isolated_margin > 0:
+                margin_x18 = int(Decimal(str(isolated_margin)) * 10**18)
+                margin_x18 = margin_x18 - margin_x18 % size_inc if size_inc else margin_x18
+                appendix = build_appendix(OrderType.DEFAULT, isolated=True, isolated_margin=margin_x18)
+            else:
+                appendix = build_appendix(OrderType.DEFAULT, isolated=True)
+
             order = OrderParams(
                 sender=self._subaccount_hex,
                 amount=amount_x18,
                 nonce=gen_order_nonce(),
                 priceX18=price_x18,
                 expiration=get_expiration_timestamp(300),
-                appendix=build_appendix(OrderType.DEFAULT),
+                appendix=appendix,
             )
 
             params = PlaceOrderParams(
