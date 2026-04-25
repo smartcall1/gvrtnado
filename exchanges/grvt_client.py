@@ -119,7 +119,7 @@ class GrvtClient(BaseExchangeClient):
             grvt_sym = self._grvt_symbol(symbol)
             ticker = await self._retry(self._api.fetch_ticker, grvt_sym)
             if ticker:
-                price = float(ticker.get("mark", ticker.get("last", 0)))
+                price = float(ticker.get("mark_price", ticker.get("last_price", 0)))
                 self._ws_prices[symbol] = price
                 self._ws_prices_ts[symbol] = time.time()
                 return price
