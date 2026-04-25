@@ -68,6 +68,11 @@ class PairManager:
                 best_score = score
                 best_pair = pair
 
+        if best_score <= -999.0 and funding_spreads:
+            top = max(funding_spreads, key=funding_spreads.get)
+            logger.info(f"No pair passed liquidity filter, picking best funding spread: {top}")
+            best_pair = top
+
         return best_pair
 
     def to_dict(self) -> dict:

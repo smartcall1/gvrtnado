@@ -73,6 +73,7 @@ class DeltaNeutralBot:
         self._consecutive_loss_cycles = 0
         self._cycle_history: list[Cycle] = []
         self._idle_since: float = 0.0
+        self._enter_since: float = 0.0
 
     def _init_earn(self) -> EarnState:
         if self._state.earn:
@@ -185,6 +186,7 @@ class DeltaNeutralBot:
                 return
 
         self._idle_since = 0
+        self._enter_since = time.time()
         self._state.direction = direction
         self._state.cycle_state = CycleState.ENTER
         self._save_state()
@@ -205,14 +207,19 @@ class DeltaNeutralBot:
             return
 
         favorable = is_entry_favorable(direction, self._nado_price, self._grvt_price)
-        logger.info(f"[ENTER] {pair} dir={direction} NADO=${self._nado_price:.1f} GRVT=${self._grvt_price:.1f} favorable={favorable}")
         if not favorable:
             mode = self._state.mode
             if mode != OperatingMode.VOLUME_URGENT:
+                logger.info(f"[ENTER] {pair} dir={direction} NADO=${self._nado_price:.1f} GRVT=${self._grvt_price:.1f} favorable=False — waiting")
                 return
-            elapsed = time.time() - self._idle_since if self._idle_since else 0
-            if elapsed < 1800:
+            elapsed = time.time() - self._enter_since if self._enter_since else 0
+            if elapsed < 60:
+                logger.info(f"[ENTER] {pair} dir={direction} NADO=${self._nado_price:.1f} GRVT=${self._grvt_price:.1f} URGENT bypass in {60 - elapsed:.0f}s")
                 return
+            spread_pct = (self._nado_price - self._grvt_price) / self._grvt_price * 100
+            logger.info(f"[ENTER] VOLUME_URGENT bypass! {pair} dir={direction} spread={spread_pct:+.3f}% — 강제 진입")
+        else:
+            logger.info(f"[ENTER] {pair} dir={direction} NADO=${self._nado_price:.1f} GRVT=${self._grvt_price:.1f} favorable=True — 진입")
 
         nado_bal = await self._nado.get_balance()
         grvt_bal = await self._grvt.get_balance()
@@ -854,7 +861,7 @@ class DeltaNeutralBot:
                     if self._positions:
                         parts = []
                         for k, p in self._positions.items():
-                            parts.append(f"{k}:{p.side}/{p.size:.4f}@{p.entry_price:.1f}")
+                            parts.append(f"{k}:{p.side}/${p.notional:.0f}@{p.entry_price:.1f}")
                         pos_str = " | ".join(parts)
                     else:
                         pos_str = "none"
