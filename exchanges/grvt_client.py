@@ -230,8 +230,23 @@ class GrvtClient(BaseExchangeClient):
             return list(SYMBOL_MAP.keys())
 
     async def set_leverage(self, symbol: str, leverage: int) -> bool:
-        logger.info(f"GRVT leverage is set per account tier, not per API call. Requested: {leverage}x")
-        return True
+        try:
+            grvt_sym = self._grvt_symbol(symbol)
+            sub_id = self._api._trading_account_id
+            path = f"https://trades.grvt.io/full/v1/set_initial_leverage"
+            payload = {
+                "sub_account_id": str(sub_id),
+                "instrument": grvt_sym,
+                "leverage": str(leverage),
+            }
+            result = await self._api._auth_and_post(path, payload)
+            if result and result.get("success"):
+                logger.info(f"GRVT leverage set: {symbol} → {leverage}x")
+                return True
+            logger.warning(f"GRVT set_leverage response: {result}")
+        except Exception as e:
+            logger.error(f"GRVT set_leverage: {e}")
+        return False
 
     async def get_orderbook_depth(self, symbol: str) -> float:
         try:

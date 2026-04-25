@@ -436,6 +436,8 @@ class DeltaNeutralBot:
     # --- 청크 진입/퇴출 ---
 
     async def _execute_enter(self, pair: str, direction: str, notional: float) -> bool:
+        await self._grvt.set_leverage(pair, self.cfg.LEVERAGE)
+
         chunk_size = notional / self.cfg.ENTRY_CHUNKS
         nado_side = "BUY" if direction == "A" else "SELL"
         grvt_side = "SELL" if direction == "A" else "BUY"
