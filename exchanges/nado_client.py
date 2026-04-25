@@ -70,7 +70,7 @@ class NadoClient(BaseExchangeClient):
 
     async def _init_increments(self):
         try:
-            products = await asyncio.to_thread(self._client.market.get_all_products)
+            products = await asyncio.to_thread(self._client.market.get_all_engine_markets)
             if products and hasattr(products, "perp_products"):
                 for p in products.perp_products:
                     self._increments[p.product_id] = {

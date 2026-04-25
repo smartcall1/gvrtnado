@@ -260,7 +260,8 @@ class DeltaNeutralBot:
                 f"${notional:,.0f}"
             )
         else:
-            self._state.cycle_state = CycleState.IDLE
+            self._state.cycle_state = CycleState.COOLDOWN
+            self._state.cooldown_until = time.time() + 300
             self._save_state()
 
     async def _handle_hold(self):

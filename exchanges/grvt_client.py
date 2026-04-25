@@ -230,45 +230,12 @@ class GrvtClient(BaseExchangeClient):
             return list(SYMBOL_MAP.keys())
 
     async def set_leverage(self, symbol: str, leverage: int) -> bool:
-        grvt_sym = self._grvt_symbol(symbol)
-        sub_id = str(self._api._trading_account_id)
-        lev_str = f"{leverage}.000000000"
-
-        payloads = [
-            {
-                "sub_account_id": sub_id,
-                "asset_kind": "PERPETUAL",
-                "instrument_name": grvt_sym,
-                "margin_config": {
-                    "margin_type": "CROSS",
-                    "leverage": lev_str,
-                },
-            },
-            {
-                "sub_account_id": sub_id,
-                "instrument": grvt_sym,
-                "margin_config": {
-                    "margin_type": "CROSS",
-                    "leverage": lev_str,
-                },
-            },
-        ]
-
-        path = "https://trades.grvt.io/full/v1/set_position_config"
-        for i, payload in enumerate(payloads):
-            try:
-                result = await self._api._auth_and_post(path, payload)
-                if result and isinstance(result, dict):
-                    if result.get("code") and result["code"] != 0:
-                        logger.info(f"GRVT set_position_config attempt {i+1}: {result}")
-                        continue
-                    logger.info(f"GRVT leverage set via set_position_config: {symbol} → {leverage}x")
-                    return True
-            except Exception as e:
-                logger.info(f"GRVT set_position_config attempt {i+1}: {e}")
-
-        logger.warning(f"GRVT set_position_config failed — EIP-712 서명 필요. 웹UI에서 {symbol} {leverage}x 수동 설정 확인 필요")
-        return True
+        ok = await self.check_leverage(symbol, leverage)
+        if ok:
+            logger.info(f"GRVT {symbol} leverage already {leverage}x")
+            return True
+        logger.warning(f"GRVT {symbol} leverage != {leverage}x — 웹UI에서 수동 설정 필요")
+        return False
 
     async def check_leverage(self, symbol: str, expected: int) -> bool:
         try:
@@ -278,20 +245,21 @@ class GrvtClient(BaseExchangeClient):
             payload = {"sub_account_id": str(sub_id)}
             result = await self._retry(self._api._auth_and_post, path, payload)
             if result and isinstance(result, dict):
-                leverages = result.get("result", result.get("leverages", []))
+                leverages = result.get("results", result.get("result", []))
+                if isinstance(leverages, dict):
+                    leverages = leverages.get("results", leverages.get("result", []))
                 for item in leverages:
                     if item.get("instrument") == grvt_sym:
                         current = int(float(item.get("leverage", 0)))
                         if current == expected:
                             return True
-                        logger.warning(f"GRVT {symbol} leverage={current}x (expected {expected}x) — 웹UI에서 변경 필요")
+                        logger.warning(f"GRVT {symbol} leverage={current}x (expected {expected}x)")
                         return False
-                logger.warning(f"GRVT {symbol} leverage info not found — 웹UI에서 {expected}x 설정 필요")
-                return False
-            return True
+            logger.warning(f"GRVT {symbol} leverage info not found")
+            return False
         except Exception as e:
-            logger.warning(f"GRVT check_leverage failed (proceeding anyway): {e}")
-            return True
+            logger.warning(f"GRVT check_leverage failed: {e}")
+            return False
 
     async def get_orderbook_depth(self, symbol: str) -> float:
         try:
