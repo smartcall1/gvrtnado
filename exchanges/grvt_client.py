@@ -237,18 +237,18 @@ class GrvtClient(BaseExchangeClient):
         payloads = [
             {
                 "sub_account_id": sub_id,
-                "instrument": grvt_sym,
+                "asset_kind": "PERPETUAL",
+                "instrument_name": grvt_sym,
                 "margin_config": {
-                    "margin_type": "SIMPLE_CROSS_MARGIN",
+                    "margin_type": "CROSS",
                     "leverage": lev_str,
                 },
             },
             {
                 "sub_account_id": sub_id,
-                "asset_kind": "PERPETUAL",
-                "instrument_name": grvt_sym,
+                "instrument": grvt_sym,
                 "margin_config": {
-                    "margin_type": "SIMPLE_CROSS_MARGIN",
+                    "margin_type": "CROSS",
                     "leverage": lev_str,
                 },
             },
