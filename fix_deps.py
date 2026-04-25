@@ -5,8 +5,7 @@ nado-protocol과 grvt-pysdk의 의존성 충돌을 해결한다.
    → encode_structured_data → encode_typed_data 패치
 
 2) pydantic: nado-protocol은 v1 문법 사용, grvt-pysdk가 v2 설치
-   → @root_validator → @root_validator(skip_on_failure=True) 패치
-   → @validator → @field_validator 호환 패치
+   → pydantic v2의 내장 호환 레이어(pydantic.v1)로 import 일괄 전환
 
 사용법:
     pip install grvt-pysdk
@@ -53,7 +52,7 @@ def patch_eth_account(pkg_dir: Path):
             print(f"[PATCHED] {py_file}")
             patched = True
     if not patched:
-        print("[OK] encode_structured_data already patched or not found")
+        print("[OK] already patched or not found")
 
     try:
         from eth_account.messages import encode_typed_data
@@ -64,7 +63,7 @@ def patch_eth_account(pkg_dir: Path):
 
 
 def patch_pydantic(pkg_dir: Path):
-    """pydantic v1 → v2 호환 패치"""
+    """pydantic v1 import를 pydantic.v1 호환 레이어로 전환"""
     print("\n--- pydantic v2 호환 패치 ---")
     try:
         import pydantic
@@ -77,35 +76,47 @@ def patch_pydantic(pkg_dir: Path):
         print(f"[OK] pydantic v{pydantic.VERSION} — v1이므로 패치 불필요")
         return
 
-    print(f"[INFO] pydantic v{pydantic.VERSION} 감지 — v1 문법 패치 적용")
+    # pydantic.v1 호환 레이어 존재 확인
+    try:
+        from pydantic import v1 as _
+        print(f"[INFO] pydantic v{pydantic.VERSION} — pydantic.v1 호환 레이어 사용")
+    except ImportError:
+        print(f"[ERROR] pydantic v{pydantic.VERSION}에 v1 호환 레이어 없음")
+        print("        pip install 'pydantic[v1]' 또는 pip install pydantic-v1-compat 시도")
+        sys.exit(1)
 
     for py_file in pkg_dir.rglob("*.py"):
         text = py_file.read_text(encoding="utf-8", errors="ignore")
         original = text
 
-        # @root_validator → @root_validator(skip_on_failure=True)
-        if "@root_validator" in text and "skip_on_failure" not in text:
-            text = text.replace(
-                "@root_validator\n",
-                "@root_validator(skip_on_failure=True)\n",
-            )
-            text = text.replace(
-                "@root_validator\r\n",
-                "@root_validator(skip_on_failure=True)\r\n",
-            )
-            text = re.sub(
-                r"@root_validator\(pre=False\)",
-                "@root_validator(pre=False, skip_on_failure=True)",
-                text,
-            )
+        # 이미 pydantic.v1을 쓰고 있으면 건너뜀
+        if "pydantic.v1" in text:
+            continue
 
-        # conlist/conset: min_items → min_length, max_items → max_length
-        text = text.replace("min_items=", "min_length=")
-        text = text.replace("max_items=", "max_length=")
+        # from pydantic import X → from pydantic.v1 import X
+        text = re.sub(
+            r"^(from\s+)pydantic(\s+import\s+)",
+            r"\1pydantic.v1\2",
+            text,
+            flags=re.MULTILINE,
+        )
 
-        # Field: min_items/max_items도 동일
-        # constr: regex → pattern
-        text = re.sub(r'constr\(([^)]*)\bregex=', r'constr(\1pattern=', text)
+        # from pydantic.XXX import Y → from pydantic.v1.XXX import Y
+        # (fields, types, networks, validators 등)
+        text = re.sub(
+            r"^(from\s+)pydantic\.((?!v1)[a-z_]+)(\s+import\s+)",
+            r"\1pydantic.v1.\2\3",
+            text,
+            flags=re.MULTILINE,
+        )
+
+        # import pydantic → import pydantic.v1 as pydantic
+        text = re.sub(
+            r"^import pydantic$",
+            "import pydantic.v1 as pydantic",
+            text,
+            flags=re.MULTILINE,
+        )
 
         if text != original:
             py_file.write_text(text, encoding="utf-8")
@@ -117,12 +128,12 @@ def patch_pydantic(pkg_dir: Path):
 def verify():
     """패치 후 import 검증"""
     print("\n--- 검증 ---")
-    try:
-        # 기존 캐시 무효화
-        mods_to_remove = [k for k in sys.modules if k.startswith("nado_protocol")]
-        for m in mods_to_remove:
-            del sys.modules[m]
+    # 기존 캐시 무효화
+    mods_to_remove = [k for k in sys.modules if k.startswith("nado_protocol")]
+    for m in mods_to_remove:
+        del sys.modules[m]
 
+    try:
         import nado_protocol
         print("[OK] nado_protocol import 성공")
     except Exception as e:
