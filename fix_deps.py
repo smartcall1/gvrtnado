@@ -82,10 +82,8 @@ def patch_pydantic(pkg_dir: Path):
     for py_file in pkg_dir.rglob("*.py"):
         text = py_file.read_text(encoding="utf-8", errors="ignore")
         original = text
-        changed = False
 
         # @root_validator → @root_validator(skip_on_failure=True)
-        # 이미 skip_on_failure가 있으면 건너뜀
         if "@root_validator" in text and "skip_on_failure" not in text:
             text = text.replace(
                 "@root_validator\n",
@@ -95,17 +93,21 @@ def patch_pydantic(pkg_dir: Path):
                 "@root_validator\r\n",
                 "@root_validator(skip_on_failure=True)\r\n",
             )
-            # @root_validator(pre=True) — pre=True는 skip_on_failure 불필요
-            # @root_validator(pre=False) → 필요
             text = re.sub(
                 r"@root_validator\(pre=False\)",
                 "@root_validator(pre=False, skip_on_failure=True)",
                 text,
             )
-            if text != original:
-                changed = True
 
-        if changed:
+        # conlist/conset: min_items → min_length, max_items → max_length
+        text = text.replace("min_items=", "min_length=")
+        text = text.replace("max_items=", "max_length=")
+
+        # Field: min_items/max_items도 동일
+        # constr: regex → pattern
+        text = re.sub(r'constr\(([^)]*)\bregex=', r'constr(\1pattern=', text)
+
+        if text != original:
             py_file.write_text(text, encoding="utf-8")
             print(f"[PATCHED] {py_file}")
 
