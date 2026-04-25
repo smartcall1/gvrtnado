@@ -1,6 +1,7 @@
 # exchanges/nado_client.py
 import asyncio
 import logging
+from decimal import Decimal
 from typing import Optional
 
 from exchanges.base_client import BaseExchangeClient, OrderResult
@@ -30,6 +31,7 @@ class NadoClient(BaseExchangeClient):
         self._client = None
         self._subaccount_hex: str = ""
         self._symbol_map: dict[str, int] = {}
+        self._increments: dict[int, dict] = {}
 
     async def connect(self):
         try:
@@ -45,6 +47,7 @@ class NadoClient(BaseExchangeClient):
         )
         logger.info(f"NADO subaccount: {self._subaccount_hex}")
         await self._init_symbol_map()
+        await self._init_increments()
 
     async def close(self):
         self._client = None
@@ -64,6 +67,20 @@ class NadoClient(BaseExchangeClient):
         except Exception as e:
             logger.warning(f"Failed to init NADO symbol map: {e}, using defaults")
             self._symbol_map = {"BTC": 1, "ETH": 2, "SOL": 3}
+
+    async def _init_increments(self):
+        try:
+            products = await asyncio.to_thread(self._client.market.get_all_products)
+            if products and hasattr(products, "perp_products"):
+                for p in products.perp_products:
+                    self._increments[p.product_id] = {
+                        "price_x18": int(p.book_info.price_increment_x18),
+                        "size": int(p.book_info.size_increment),
+                        "min_size": int(p.book_info.min_size),
+                    }
+                logger.info(f"NADO loaded increments for {len(self._increments)} perp products")
+        except Exception as e:
+            logger.warning(f"Failed to load NADO increments: {e}")
 
     def _product_id(self, symbol: str) -> int:
         pid = self._symbol_map.get(symbol.upper())
@@ -150,7 +167,15 @@ class NadoClient(BaseExchangeClient):
             from nado_protocol.utils.execute import OrderParams
 
             product_id = self._product_id(symbol)
-            amount_x18 = int(size * 1e18)
+            inc = self._increments.get(product_id, {})
+            price_inc = inc.get("price_x18", 10**16)
+            size_inc = inc.get("size", 10**16)
+
+            price_x18 = int(Decimal(str(price)) * 10**18)
+            price_x18 = price_x18 - price_x18 % price_inc
+
+            amount_x18 = int(Decimal(str(size)) * 10**18)
+            amount_x18 = amount_x18 - amount_x18 % size_inc
             if side.upper() != "BUY":
                 amount_x18 = -amount_x18
 
@@ -158,7 +183,7 @@ class NadoClient(BaseExchangeClient):
                 sender=self._subaccount_hex,
                 amount=amount_x18,
                 nonce=gen_order_nonce(),
-                priceX18=int(price * 1e18),
+                priceX18=price_x18,
                 expiration=get_expiration_timestamp(300),
                 appendix=build_appendix(OrderType.DEFAULT),
             )
