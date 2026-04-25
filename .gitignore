@@ -1,6 +1,11 @@
 .env
+.env.*
+!.env.example
 __pycache__/
 *.pyc
 logs/
 .stop_bot
 *.egg-info/
+*.pem
+*.key
+bot_state.json
