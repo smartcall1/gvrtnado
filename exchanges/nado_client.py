@@ -144,7 +144,8 @@ class NadoClient(BaseExchangeClient):
     ) -> OrderResult:
         try:
             from nado_protocol.utils.nonce import gen_order_nonce
-            from nado_protocol.utils.expiration import get_expiration_timestamp
+            from nado_protocol.utils.expiration import get_expiration_timestamp, OrderType
+            from nado_protocol.utils.order import build_appendix
             from nado_protocol.engine_client.types.execute import PlaceOrderParams
             from nado_protocol.utils.execute import OrderParams
 
@@ -159,7 +160,7 @@ class NadoClient(BaseExchangeClient):
                 nonce=gen_order_nonce(),
                 priceX18=int(price * 1e18),
                 expiration=get_expiration_timestamp(300),
-                appendix=0,
+                appendix=build_appendix(OrderType.DEFAULT),
             )
 
             params = PlaceOrderParams(

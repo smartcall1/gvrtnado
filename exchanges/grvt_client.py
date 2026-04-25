@@ -1,6 +1,7 @@
 # exchanges/grvt_client.py
 import asyncio
 import logging
+import math
 import time
 from typing import Optional
 
@@ -147,11 +148,22 @@ class GrvtClient(BaseExchangeClient):
             logger.error(f"GRVT get_funding_rate: {e}")
         return None
 
+    def _align_tick(self, grvt_sym: str, price: float, size: float) -> tuple[float, float]:
+        market = self._api.markets.get(grvt_sym, {})
+        tick = float(market.get("tick_size", 0.01))
+        min_sz = float(market.get("min_size", 0.01))
+        price = round(round(price / tick) * tick, 10)
+        size = round(math.floor(size / min_sz) * min_sz, 10)
+        return price, size
+
     async def place_limit_order(
         self, symbol: str, side: str, size: float, price: float,
     ) -> OrderResult:
         try:
             grvt_sym = self._grvt_symbol(symbol)
+            price, size = self._align_tick(grvt_sym, price, size)
+            if size <= 0:
+                return OrderResult(order_id="", status="error", message="size too small after tick alignment")
             result = await self._retry(
                 self._api.create_order,
                 grvt_sym, "limit", side.lower(), size, price,
@@ -181,6 +193,7 @@ class GrvtClient(BaseExchangeClient):
             close_side, close_price = "buy", price * (1 + slippage_pct)
         try:
             grvt_sym = self._grvt_symbol(symbol)
+            close_price, size = self._align_tick(grvt_sym, close_price, size)
             result = await self._retry(
                 self._api.create_order,
                 grvt_sym, "limit", close_side, size, close_price,
