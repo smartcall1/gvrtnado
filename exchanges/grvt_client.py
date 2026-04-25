@@ -128,9 +128,15 @@ class GrvtClient(BaseExchangeClient):
     async def get_funding_rate(self, symbol: str) -> Optional[float]:
         try:
             grvt_sym = self._grvt_symbol(symbol)
-            result = await self._retry(self._api.fetch_funding_rate_history, grvt_sym, 0, 1)
-            if result and len(result) > 0:
-                rate = result[0].get("fundingRate")
+            since_ns = int((time.time() - 86400) * 1e9)
+            result = await self._retry(self._api.fetch_funding_rate_history, grvt_sym, since_ns, 1)
+            if isinstance(result, dict):
+                entries = result.get("result", [])
+            else:
+                entries = result if isinstance(result, list) else []
+            if entries and len(entries) > 0:
+                entry = entries[-1] if isinstance(entries, list) else entries
+                rate = entry.get("funding_rate", entry.get("fundingRate"))
                 if rate is not None:
                     return float(rate)
         except Exception as e:

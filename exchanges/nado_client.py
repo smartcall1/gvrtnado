@@ -63,7 +63,7 @@ class NadoClient(BaseExchangeClient):
     async def get_balance(self) -> float:
         try:
             result = await asyncio.to_thread(
-                self._client.perp.get_subaccount_summary,
+                self._client.subaccount.get_engine_subaccount_summary,
                 self._client.context.signer_subaccount,
             )
             if result:
@@ -83,7 +83,7 @@ class NadoClient(BaseExchangeClient):
         try:
             product_id = self._product_id(symbol)
             result = await asyncio.to_thread(
-                self._client.perp.get_subaccount_summary,
+                self._client.subaccount.get_engine_subaccount_summary,
                 self._client.context.signer_subaccount,
             )
             if result:
