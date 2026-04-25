@@ -228,5 +228,5 @@ class GrvtClient(BaseExchangeClient):
                 mark = await self.get_mark_price(symbol) or 0
                 return (bid_depth + ask_depth) * mark
         except Exception as e:
-            logger.error(f"GRVT get_orderbook_depth: {e}")
+            logger.debug(f"GRVT get_orderbook_depth({symbol}): {e}")
         return 0.0
