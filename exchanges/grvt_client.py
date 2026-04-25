@@ -174,20 +174,30 @@ class GrvtClient(BaseExchangeClient):
                 order_id = str(result.get("id", ""))
                 filled = float(result.get("filled", 0))
 
-                if status == "open" and filled == 0 and order_id:
-                    logger.info(f"GRVT {symbol} order {order_id} status=open, waiting for fill...")
-                    await asyncio.sleep(3)
-                    try:
-                        order_info = await self._retry(self._api.fetch_order, order_id, grvt_sym)
-                        if order_info:
-                            status = order_info.get("status", status)
-                            filled = float(order_info.get("filled", filled))
-                            logger.info(f"GRVT {symbol} order {order_id} polled: status={status}, filled={filled}")
-                    except Exception as poll_err:
-                        logger.warning(f"GRVT {symbol} order poll failed: {poll_err}")
+                if status not in ("closed", "filled") and filled <= 0 and order_id:
+                    logger.info(f"GRVT {symbol} order {order_id} status={status}, waiting for fill...")
+                    for _poll in range(3):
+                        await asyncio.sleep(2)
+                        try:
+                            order_info = await self._retry(self._api.fetch_order, order_id, grvt_sym)
+                            if order_info:
+                                status = order_info.get("status", status)
+                                filled = float(order_info.get("filled", filled))
+                                logger.info(f"GRVT {symbol} order poll {_poll+1}: status={status}, filled={filled}")
+                                if status in ("closed", "filled") or filled > 0:
+                                    break
+                        except Exception as poll_err:
+                            logger.warning(f"GRVT {symbol} order poll failed: {poll_err}")
+
+                    if status not in ("closed", "filled") and filled <= 0:
+                        logger.warning(f"GRVT {symbol} order {order_id} still unfilled, cancelling")
+                        try:
+                            await self._api.cancel_order(order_id, grvt_sym)
+                        except Exception:
+                            pass
 
                 if status not in ("closed", "filled") and filled <= 0:
-                    logger.warning(f"GRVT {symbol} order status={status}, result={result}")
+                    logger.warning(f"GRVT {symbol} order final status={status}, result={result}")
                 return OrderResult(
                     order_id=order_id,
                     status="filled" if status in ("closed", "filled") or filled > 0 else status,
