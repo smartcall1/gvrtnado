@@ -240,7 +240,11 @@ class NadoClient(BaseExchangeClient):
                                 logger.info(f"NADO {symbol}: succeeded with {_margin_mult}x margin")
                             break
                         except Exception as iso_err:
-                            if "2006" in str(iso_err) and _margin_mult < 3:
+                            iso_err_str = str(iso_err)
+                            if "2070" in iso_err_str:
+                                logger.error(f"NADO {symbol}: max open interest reached (2070)")
+                                raise
+                            if "2006" in iso_err_str and _margin_mult < 3:
                                 logger.warning(f"NADO {symbol}: margin {_margin_mult}x insufficient (2006), trying {_margin_mult+1}x")
                                 continue
                             raise
@@ -261,7 +265,8 @@ class NadoClient(BaseExchangeClient):
         except Exception as e:
             err_str = str(e)
             logger.error(f"NADO place_limit_order: {err_str}")
-            return OrderResult(order_id="", status="error", message="nado_health" if "2006" in err_str else "order failed")
+            msg = "nado_health" if "2006" in err_str else "nado_max_oi" if "2070" in err_str else "order failed"
+            return OrderResult(order_id="", status="error", message=msg)
         return OrderResult(order_id="", status="error", message="order failed")
 
     async def close_position(
