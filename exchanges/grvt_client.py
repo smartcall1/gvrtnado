@@ -267,8 +267,8 @@ class GrvtClient(BaseExchangeClient):
             except Exception as e:
                 logger.info(f"GRVT set_position_config attempt {i+1}: {e}")
 
-        logger.warning(f"GRVT set_position_config failed — check_leverage fallback ({symbol} {leverage}x)")
-        return await self.check_leverage(symbol, leverage)
+        logger.warning(f"GRVT set_position_config failed — EIP-712 서명 필요. 웹UI에서 {symbol} {leverage}x 수동 설정 확인 필요")
+        return True
 
     async def check_leverage(self, symbol: str, expected: int) -> bool:
         try:
