@@ -75,7 +75,7 @@ class Config:
         self.CHUNK_WAIT = 30  # 청크 간 대기 시간 (초)
         self.SLIPPAGE_PCT = 0.004  # 0.4% 슬리피지
         self.EMERGENCY_SLIPPAGE_PCT = 0.01  # 긴급 상황 1% 슬리피지
-        self.MARGIN_BUFFER = 0.95  # 마진 버퍼 (유효마진의 95%)
+        self.MARGIN_BUFFER = 0.65  # 마진 버퍼 (유효마진의 65%, NADO account health 여유 확보)
         self.POLL_BALANCE_SECONDS = 300  # 잔고 폴링 (5분)
         self.POLL_FUNDING_SECONDS = 3600  # 펀딩 폴링 (1시간)
 
