@@ -31,6 +31,7 @@ class GrvtClient(BaseExchangeClient):
         self._ws_prices: dict[str, float] = {}
         self._ws_prices_ts: dict[str, float] = {}
         self._price_cache_ttl = 3.0
+        self._ob_diag_done = False
 
     def _grvt_symbol(self, symbol: str) -> str:
         return SYMBOL_MAP.get(symbol.upper(), f"{symbol.upper()}_USDT_Perp")
@@ -222,11 +223,24 @@ class GrvtClient(BaseExchangeClient):
         try:
             grvt_sym = self._grvt_symbol(symbol)
             book = await self._retry(self._api.fetch_order_book, grvt_sym, 10)
-            if book:
-                bid_depth = sum(float(b[1]) for b in book.get("bids", []))
-                ask_depth = sum(float(a[1]) for a in book.get("asks", []))
-                mark = await self.get_mark_price(symbol) or 0
-                return (bid_depth + ask_depth) * mark
+            if not isinstance(book, dict):
+                return 0.0
+            bids = book.get("bids", [])
+            asks = book.get("asks", [])
+            if not self._ob_diag_done and bids:
+                self._ob_diag_done = True
+                sample = bids[0]
+                logger.info(f"[DIAG] GRVT orderbook format: {type(sample).__name__} = {sample}")
+            if not bids and not asks:
+                return 0.0
+            bid_depth = sum(
+                float(b["size"] if isinstance(b, dict) else b[1]) for b in bids
+            )
+            ask_depth = sum(
+                float(a["size"] if isinstance(a, dict) else a[1]) for a in asks
+            )
+            mark = await self.get_mark_price(symbol) or 0
+            return (bid_depth + ask_depth) * mark
         except Exception as e:
             logger.debug(f"GRVT get_orderbook_depth({symbol}): {e}")
         return 0.0

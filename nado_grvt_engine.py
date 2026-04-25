@@ -138,6 +138,8 @@ class DeltaNeutralBot:
                 nd = await self._nado.get_orderbook_depth(pair)
                 gd = await self._grvt.get_orderbook_depth(pair)
                 liquidities[pair] = min(nd, gd) if nd and gd else 0
+                if pair == "BTC":
+                    logger.info(f"[DIAG] BTC depth: NADO=${nd:,.0f} GRVT=${gd:,.0f}")
             except Exception as e:
                 logger.warning(f"Pair scan {pair}: {e}")
 
