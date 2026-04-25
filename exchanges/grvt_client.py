@@ -52,7 +52,7 @@ class GrvtClient(BaseExchangeClient):
                     "trading_account_id": self._account_id,
                 },
             )
-            await self._api.load_markets()
+            await self._api.initialize()
             logger.info(f"GRVT connected, {len(self._api.markets)} markets loaded")
         except ImportError:
             logger.error("grvt-pysdk not installed. Run: pip install grvt-pysdk")
