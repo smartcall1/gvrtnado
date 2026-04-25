@@ -58,7 +58,7 @@ def patch_eth_account(pkg_dir: Path):
         from eth_account.messages import encode_typed_data
         print("[OK] eth_account.encode_typed_data available")
     except ImportError:
-        print("[ERROR] eth_account too old — need >=0.13.0")
+        print("[ERROR] eth_account too old - need >=0.13.0")
         sys.exit(1)
 
 
@@ -73,13 +73,13 @@ def patch_pydantic(pkg_dir: Path):
         return
 
     if version < 2:
-        print(f"[OK] pydantic v{pydantic.VERSION} — v1이므로 패치 불필요")
+        print(f"[OK] pydantic v{pydantic.VERSION} - v1이므로 패치 불필요")
         return
 
     # pydantic.v1 호환 레이어 존재 확인
     try:
         from pydantic import v1 as _
-        print(f"[INFO] pydantic v{pydantic.VERSION} — pydantic.v1 호환 레이어 사용")
+        print(f"[INFO] pydantic v{pydantic.VERSION} - pydantic.v1 호환 레이어 사용")
     except ImportError:
         print(f"[ERROR] pydantic v{pydantic.VERSION}에 v1 호환 레이어 없음")
         print("        pip install 'pydantic[v1]' 또는 pip install pydantic-v1-compat 시도")

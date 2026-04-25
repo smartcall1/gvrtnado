@@ -1,23 +1,18 @@
 # exchanges/nado_client.py
 import asyncio
 import logging
-import aiohttp
 from typing import Optional
 
 from exchanges.base_client import BaseExchangeClient, OrderResult
 
 logger = logging.getLogger(__name__)
 
-GATEWAY_PROD = "https://gateway.prod.nado.xyz/v1"
-ARCHIVE_PROD = "https://archive.prod.nado.xyz/v1"
-
 
 class NadoClient(BaseExchangeClient):
     def __init__(self, private_key: str):
         self._private_key = private_key
         self._client = None
-        self._symbol_map: dict[str, int] = {}  # BTC -> product_id
-        self._session: Optional[aiohttp.ClientSession] = None
+        self._symbol_map: dict[str, int] = {}
 
     async def connect(self):
         try:
@@ -26,27 +21,37 @@ class NadoClient(BaseExchangeClient):
         except ImportError:
             logger.error("nado-protocol SDK not installed. Run: pip install nado-protocol")
             raise
-        self._session = aiohttp.ClientSession()
         await self._init_symbol_map()
 
     async def close(self):
-        if self._session:
-            await self._session.close()
-            self._session = None
+        self._client = None
 
     async def _init_symbol_map(self):
         try:
-            resp = await self._query("all_products", {})
-            if resp:
-                for product in resp:
-                    pid = product.get("product_id")
-                    symbol = product.get("symbol", "")
-                    name = symbol.split("-")[0].upper() if "-" in symbol else symbol.upper()
-                    if pid is not None:
+            result = await asyncio.to_thread(self._client.market.get_all_product_symbols)
+            if result:
+                data = result.data if hasattr(result, 'data') else result
+                if isinstance(data, list):
+                    for item in data:
+                        if hasattr(item, 'product_id') and hasattr(item, 'symbol'):
+                            name = item.symbol.split("-")[0].upper()
+                            self._symbol_map[name] = item.product_id
+                        elif isinstance(item, dict):
+                            pid = item.get("product_id")
+                            sym = item.get("symbol", "")
+                            name = sym.split("-")[0].upper() if "-" in sym else sym.upper()
+                            if pid is not None:
+                                self._symbol_map[name] = pid
+                elif isinstance(data, dict):
+                    for sym, pid in data.items():
+                        name = sym.split("-")[0].upper() if "-" in sym else sym.upper()
                         self._symbol_map[name] = pid
+            if self._symbol_map:
                 logger.info(f"NADO symbol map: {self._symbol_map}")
+            else:
+                raise ValueError("Empty symbol map")
         except Exception as e:
-            logger.warning(f"Failed to init NADO symbol map: {e}")
+            logger.warning(f"Failed to init NADO symbol map: {e}, using defaults")
             self._symbol_map = {"BTC": 1, "ETH": 2, "SOL": 3}
 
     def _product_id(self, symbol: str) -> int:
@@ -55,76 +60,92 @@ class NadoClient(BaseExchangeClient):
             raise ValueError(f"Unknown NADO symbol: {symbol}")
         return pid
 
-    async def _query(self, endpoint: str, params: dict) -> Optional[dict]:
-        url = f"{GATEWAY_PROD}/query"
-        payload = {"type": endpoint, **params}
-        for attempt in range(3):
-            try:
-                async with self._session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data.get("data", data)
-                    logger.warning(f"NADO query {endpoint} status={resp.status}")
-            except Exception as e:
-                logger.warning(f"NADO query {endpoint} attempt {attempt+1}: {e}")
-                if attempt < 2:
-                    await asyncio.sleep(1 * (attempt + 1))
-        return None
-
-    async def _execute(self, action: str, params: dict) -> Optional[dict]:
-        if not self._client:
-            raise RuntimeError("NADO client not connected")
-        try:
-            result = await asyncio.to_thread(
-                getattr(self._client.market, action), params
-            )
-            return result if isinstance(result, dict) else {"result": result}
-        except Exception as e:
-            logger.error(f"NADO execute {action}: {e}")
-            return None
-
     async def get_balance(self) -> float:
         try:
-            resp = await self._query("account_info", {})
-            if resp:
-                for key in ("equity", "balance", "available_balance", "collateral"):
-                    if key in resp:
-                        return float(resp[key])
+            result = await asyncio.to_thread(
+                self._client.perp.get_subaccount_summary,
+                self._client.context.signer_subaccount,
+            )
+            if result:
+                data = result.data if hasattr(result, 'data') else result
+                if hasattr(data, 'balance'):
+                    return float(data.balance) / 1e18 if float(data.balance) > 1e15 else float(data.balance)
+                if isinstance(data, dict):
+                    for key in ("equity", "balance", "available_balance", "collateral"):
+                        if key in data:
+                            val = float(data[key])
+                            return val / 1e18 if val > 1e15 else val
         except Exception as e:
             logger.error(f"NADO get_balance: {e}")
         return 0.0
 
     async def get_positions(self, symbol: str) -> list[dict]:
         try:
-            resp = await self._query("positions", {"product_id": self._product_id(symbol)})
-            if resp and isinstance(resp, list):
-                return [p for p in resp if abs(float(p.get("size", p.get("amount", 0)))) > 0]
+            product_id = self._product_id(symbol)
+            result = await asyncio.to_thread(
+                self._client.perp.get_subaccount_summary,
+                self._client.context.signer_subaccount,
+            )
+            if result:
+                data = result.data if hasattr(result, 'data') else result
+                perps = getattr(data, 'perp_balances', None) or (data.get('perp_balances') if isinstance(data, dict) else None)
+                if perps:
+                    positions = []
+                    for p in perps:
+                        pid = getattr(p, 'product_id', None) or (p.get('product_id') if isinstance(p, dict) else None)
+                        if pid != product_id:
+                            continue
+                        amount = float(getattr(p, 'amount', 0) or (p.get('amount', 0) if isinstance(p, dict) else 0))
+                        if amount > 1e15:
+                            amount = amount / 1e18
+                        if abs(amount) > 0:
+                            positions.append({
+                                "side": "LONG" if amount > 0 else "SHORT",
+                                "size": abs(amount),
+                                "entry_price": 0,
+                                "notional": 0,
+                            })
+                    return positions
         except Exception as e:
             logger.error(f"NADO get_positions: {e}")
         return []
 
     async def get_mark_price(self, symbol: str) -> Optional[float]:
         try:
-            resp = await self._query("market_info", {"product_id": self._product_id(symbol)})
-            if resp:
-                for key in ("mark_price", "markPrice", "price"):
-                    val = resp.get(key)
-                    if val:
-                        price = float(val)
-                        if price > 1e15:
-                            price = price / 1e18
-                        return price
+            product_id = self._product_id(symbol)
+            result = await asyncio.to_thread(self._client.market.get_latest_market_price, product_id)
+            if result:
+                data = result.data if hasattr(result, 'data') else result
+                price = None
+                if hasattr(data, 'bid'):
+                    bid = float(data.bid)
+                    ask = float(getattr(data, 'ask', bid))
+                    price = (bid + ask) / 2
+                elif isinstance(data, dict):
+                    for key in ("mark_price", "bid", "price"):
+                        val = data.get(key)
+                        if val:
+                            price = float(val)
+                            break
+                if price and price > 1e15:
+                    price = price / 1e18
+                return price
         except Exception as e:
             logger.error(f"NADO get_mark_price: {e}")
         return None
 
     async def get_funding_rate(self, symbol: str) -> Optional[float]:
         try:
-            resp = await self._query("funding_rate", {"product_id": self._product_id(symbol)})
-            if resp:
-                rate = resp.get("funding_rate", resp.get("rate"))
-                if rate is not None:
-                    return float(rate)
+            product_id = self._product_id(symbol)
+            result = await asyncio.to_thread(self._client.market.get_perp_funding_rate, product_id)
+            if result:
+                data = result.data if hasattr(result, 'data') else result
+                if hasattr(data, 'funding_rate'):
+                    return float(data.funding_rate)
+                if isinstance(data, dict):
+                    rate = data.get("funding_rate", data.get("rate"))
+                    if rate is not None:
+                        return float(rate)
         except Exception as e:
             logger.error(f"NADO get_funding_rate: {e}")
         return None
@@ -133,25 +154,43 @@ class NadoClient(BaseExchangeClient):
         self, symbol: str, side: str, size: float, price: float,
     ) -> OrderResult:
         try:
-            from nado_protocol.utils import to_x18, gen_order_nonce, get_expiration_timestamp
-            product_id = self._product_id(symbol)
-            amount_x18 = to_x18(size if side == "BUY" else -size)
-            price_x18 = to_x18(price)
+            from nado_protocol.utils.backend import to_x18
+            from nado_protocol.utils.nonce import gen_order_nonce
+            from nado_protocol.utils.expiration import get_expiration_timestamp
+            from nado_protocol.engine_client.types.execute import PlaceOrderParams
+            from nado_protocol.utils.execute import OrderParams
 
-            order_params = {
-                "product_id": product_id,
-                "priceX18": str(price_x18),
-                "amount": str(amount_x18),
-                "nonce": str(gen_order_nonce()),
-                "expiration": str(get_expiration_timestamp()),
-            }
-            result = await self._execute("place_order", order_params)
+            product_id = self._product_id(symbol)
+            amount = int(to_x18(size)) if side.upper() == "BUY" else -int(to_x18(size))
+
+            order = OrderParams(
+                sender=self._client.context.signer_subaccount,
+                amount=amount,
+                nonce=gen_order_nonce(),
+                priceX18=int(to_x18(price)),
+                expiration=get_expiration_timestamp(),
+                appendix=0,
+            )
+
+            params = PlaceOrderParams(
+                id=None,
+                product_id=product_id,
+                order=order,
+                digest=None,
+                signature=None,
+                spot_leverage=None,
+            )
+
+            result = await asyncio.to_thread(self._client.market.place_order, params)
             if result:
+                data = result.data if hasattr(result, 'data') else result
+                status_val = getattr(result, 'status', None) or (data.get('status') if isinstance(data, dict) else None)
+                status_str = str(status_val).lower() if status_val else ""
                 return OrderResult(
-                    order_id=str(result.get("id", result.get("order_id", ""))),
-                    status="filled" if result.get("status") in ("filled", "matched") else "live",
-                    filled_size=float(result.get("filled_size", result.get("filled_amount", result.get("executed_qty", size)))),
-                    filled_price=float(result.get("average_price", result.get("avg_price", result.get("fill_price", price)))),
+                    order_id=str(getattr(data, 'digest', '') if hasattr(data, 'digest') else (data.get('digest', '') if isinstance(data, dict) else '')),
+                    status="filled" if "success" in status_str or "filled" in status_str else status_str,
+                    filled_size=size,
+                    filled_price=price,
                 )
         except Exception as e:
             logger.error(f"NADO place_limit_order: {e}")
@@ -160,20 +199,32 @@ class NadoClient(BaseExchangeClient):
     async def close_position(
         self, symbol: str, side: str, size: float, slippage_pct: float = 0.01,
     ) -> bool:
-        price = await self.get_mark_price(symbol)
-        if not price:
-            return False
-        if side == "LONG":
-            close_side, close_price = "SELL", price * (1 - slippage_pct)
-        else:
-            close_side, close_price = "BUY", price * (1 + slippage_pct)
-        result = await self.place_limit_order(symbol, close_side, size, close_price)
-        return result.status in ("filled", "matched")
+        try:
+            product_id = self._product_id(symbol)
+            result = await asyncio.to_thread(
+                self._client.market.close_position,
+                self._client.context.signer_subaccount,
+                product_id,
+            )
+            if result:
+                status_val = getattr(result, 'status', None)
+                return "success" in str(status_val).lower() if status_val else False
+        except Exception as e:
+            logger.error(f"NADO close_position: {e}")
+        return False
 
     async def cancel_all_orders(self, symbol: str) -> bool:
         try:
+            from nado_protocol.engine_client.types.execute import CancelProductOrdersParams
             product_id = self._product_id(symbol)
-            result = await self._execute("cancel_all_orders", {"product_id": product_id})
+            params = CancelProductOrdersParams(
+                sender=self._client.context.signer_subaccount,
+                product_ids=[product_id],
+                nonce=None,
+                signature=None,
+                digest=None,
+            )
+            result = await asyncio.to_thread(self._client.market.cancel_product_orders, params)
             return result is not None
         except Exception as e:
             logger.error(f"NADO cancel_all_orders: {e}")
@@ -183,24 +234,21 @@ class NadoClient(BaseExchangeClient):
         return list(self._symbol_map.keys())
 
     async def set_leverage(self, symbol: str, leverage: int) -> bool:
-        try:
-            result = await self._execute("set_leverage", {
-                "product_id": self._product_id(symbol),
-                "leverage": leverage,
-            })
-            return result is not None
-        except Exception as e:
-            logger.error(f"NADO set_leverage: {e}")
-            return False
+        logger.info(f"NADO leverage is set per subaccount, not per API call. Requested: {leverage}x")
+        return True
 
     async def get_orderbook_depth(self, symbol: str) -> float:
         try:
-            resp = await self._query("orderbook", {"product_id": self._product_id(symbol), "depth": 10})
-            if resp:
-                bids = sum(float(b.get("size", b.get("amount", 0))) for b in resp.get("bids", []))
-                asks = sum(float(a.get("size", a.get("amount", 0))) for a in resp.get("asks", []))
+            product_id = self._product_id(symbol)
+            result = await asyncio.to_thread(self._client.market.get_market_liquidity, product_id, 10)
+            if result:
+                data = result.data if hasattr(result, 'data') else result
+                bids = getattr(data, 'bids', []) if hasattr(data, 'bids') else (data.get('bids', []) if isinstance(data, dict) else [])
+                asks = getattr(data, 'asks', []) if hasattr(data, 'asks') else (data.get('asks', []) if isinstance(data, dict) else [])
+                bid_depth = sum(abs(float(getattr(b, 'size', 0) if hasattr(b, 'size') else (b[1] if isinstance(b, (list, tuple)) else b.get('size', 0)))) for b in bids)
+                ask_depth = sum(abs(float(getattr(a, 'size', 0) if hasattr(a, 'size') else (a[1] if isinstance(a, (list, tuple)) else a.get('size', 0)))) for a in asks)
                 mark = await self.get_mark_price(symbol) or 0
-                return (bids + asks) * mark
+                return (bid_depth + ask_depth) * mark
         except Exception as e:
             logger.error(f"NADO get_orderbook_depth: {e}")
         return 0.0
