@@ -801,6 +801,7 @@ class DeltaNeutralBot:
         nado_pairs = await self._nado.get_available_pairs()
         grvt_pairs = await self._grvt.get_available_pairs()
         self._pair_mgr.set_available_pairs(nado_pairs, grvt_pairs)
+        logger.info(f"Common pairs: {self._pair_mgr.common_pairs}")
 
         if self._state.boost_config:
             self._pair_mgr.load_boosts({"boosts": self._state.boost_config})

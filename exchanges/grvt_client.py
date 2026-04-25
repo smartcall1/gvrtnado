@@ -204,10 +204,11 @@ class GrvtClient(BaseExchangeClient):
             markets = await self._retry(self._api.fetch_all_markets)
             pairs = []
             for m in markets:
-                sym = m.get("id", m.get("symbol", ""))
-                if sym.endswith("_Perp") or sym.endswith("_USDT_Perp"):
+                sym = m.get("instrument", m.get("id", m.get("symbol", "")))
+                if sym.endswith("_Perp"):
                     base = sym.split("_")[0]
                     pairs.append(base)
+            logger.info(f"GRVT available pairs: {pairs}")
             return pairs
         except Exception as e:
             logger.error(f"GRVT get_available_pairs: {e}")
