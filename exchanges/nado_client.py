@@ -180,33 +180,42 @@ class NadoClient(BaseExchangeClient):
             if side.upper() != "BUY":
                 amount_x18 = -amount_x18
 
-            if isolated_margin > 0:
-                margin_x18 = int(Decimal(str(isolated_margin)) * 10**18)
-                margin_x18 = margin_x18 - margin_x18 % size_inc if size_inc else margin_x18
-                appendix = build_appendix(OrderType.DEFAULT, isolated=True, isolated_margin=margin_x18)
-            else:
-                appendix = build_appendix(OrderType.DEFAULT, isolated=True)
+            def _build_order(appx):
+                return OrderParams(
+                    sender=self._subaccount_hex,
+                    amount=amount_x18,
+                    nonce=gen_order_nonce(),
+                    priceX18=price_x18,
+                    expiration=get_expiration_timestamp(300),
+                    appendix=appx,
+                )
 
-            order = OrderParams(
-                sender=self._subaccount_hex,
-                amount=amount_x18,
-                nonce=gen_order_nonce(),
-                priceX18=price_x18,
-                expiration=get_expiration_timestamp(300),
-                appendix=appendix,
-            )
+            def _build_params(order_obj):
+                return PlaceOrderParams(
+                    id=None, product_id=product_id, order=order_obj,
+                    digest=None, signature=None, spot_leverage=None,
+                )
 
-            params = PlaceOrderParams(
-                id=None,
-                product_id=product_id,
-                order=order,
-                digest=None,
-                signature=None,
-                spot_leverage=None,
-            )
+            appendix = build_appendix(OrderType.DEFAULT)
+            try:
+                result = await asyncio.to_thread(
+                    self._client.market.place_order, _build_params(_build_order(appendix))
+                )
+            except Exception as cross_err:
+                if "2122" in str(cross_err):
+                    logger.info(f"NADO {symbol}: isolated-only market, retrying with isolated mode")
+                    if isolated_margin > 0:
+                        margin_x18 = int(Decimal(str(isolated_margin)) * 10**18)
+                        margin_x18 = margin_x18 - margin_x18 % size_inc if size_inc else margin_x18
+                        appendix = build_appendix(OrderType.DEFAULT, isolated=True, isolated_margin=margin_x18)
+                    else:
+                        appendix = build_appendix(OrderType.DEFAULT, isolated=True)
+                    result = await asyncio.to_thread(
+                        self._client.market.place_order, _build_params(_build_order(appendix))
+                    )
+                else:
+                    raise
 
-            # ExecuteResponse: status (ResponseStatus), data, error
-            result = await asyncio.to_thread(self._client.market.place_order, params)
             if result:
                 status_str = str(result.status).lower()
                 digest = ""
