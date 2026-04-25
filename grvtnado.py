@@ -3,17 +3,20 @@ import sys
 import time
 import subprocess
 import logging
+import threading
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
 MAX_CRASHES = 10
 CRASH_WINDOW = 300
 STOP_FILE = ".stop_bot"
-LOG_FILE = "logs/bot.log"
+LOG_DIR = Path("logs")
+LOG_FILE = LOG_DIR / "bot.log"
+ENGINE_LOG_FILE = LOG_DIR / "engine.log"
 LOG_SIZE = 5_000_000
 LOG_BACKUPS = 3
 
-Path("logs").mkdir(exist_ok=True)
+LOG_DIR.mkdir(exist_ok=True)
 
 handler = RotatingFileHandler(LOG_FILE, maxBytes=LOG_SIZE, backupCount=LOG_BACKUPS)
 handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
@@ -27,6 +30,15 @@ if stop_path.exists():
     stop_path.unlink()
 
 
+def _tee_stream(stream, log_file):
+    """subprocess stdout을 터미널 + 파일 양쪽에 출력한다."""
+    with open(log_file, "a", buffering=1, encoding="utf-8", errors="replace") as f:
+        for line in stream:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            f.write(line)
+
+
 def main():
     crashes: list[float] = []
 
@@ -37,17 +49,25 @@ def main():
 
         logger.info("Starting bot process...")
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 [sys.executable, "-u", "-c",
                  "import asyncio; from nado_grvt_engine import DeltaNeutralBot; asyncio.run(DeltaNeutralBot().run())"],
-                timeout=None,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
             )
+            tee = threading.Thread(target=_tee_stream, args=(proc.stdout, ENGINE_LOG_FILE), daemon=True)
+            tee.start()
+            proc.wait()
+            tee.join(timeout=5)
+
             if proc.returncode == 0:
                 logger.info("Bot exited cleanly")
                 if stop_path.exists():
                     break
         except KeyboardInterrupt:
             logger.info("Keyboard interrupt, exiting")
+            if proc and proc.poll() is None:
+                proc.terminate()
             break
         except Exception as e:
             logger.error(f"Bot crashed: {e}")
