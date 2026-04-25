@@ -127,8 +127,8 @@ class GrvtClient(BaseExchangeClient):
                     rate = result.get("fundingRate")
                     if rate is not None:
                         return float(rate)
-            except (AttributeError, Exception):
-                pass
+            except (AttributeError, Exception) as e:
+                logger.debug(f"GRVT fetch_funding_rate fallback: {e}")
             result = await self._retry(self._api.fetch_funding_rate_history, grvt_sym, None, 1)
             if result and len(result) > 0:
                 return float(result[0].get("fundingRate", 0))

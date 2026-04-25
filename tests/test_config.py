@@ -13,8 +13,12 @@ def test_defaults():
     assert cfg.EARN_TARGET_VOLUME == 300_000.0
 
 
-def test_validate_missing_keys():
+def test_validate_missing_keys(monkeypatch):
     """테스트: 필수 환경변수가 누락되었을 때 오류 반환"""
+    monkeypatch.delenv("NADO_PRIVATE_KEY", raising=False)
+    monkeypatch.delenv("GRVT_API_KEY", raising=False)
+    monkeypatch.delenv("GRVT_PRIVATE_KEY", raising=False)
+    monkeypatch.delenv("GRVT_TRADING_ACCOUNT_ID", raising=False)
     cfg = Config()
     errors = cfg.validate()
     assert any("NADO_PRIVATE_KEY" in e for e in errors)

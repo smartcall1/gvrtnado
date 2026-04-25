@@ -331,7 +331,17 @@ class DeltaNeutralBot:
     async def _handle_exit(self):
         pair = self._state.pair
         exit_reason = self._state.exit_reason or "unknown"
+
+        self._nado_price = await self._nado.get_mark_price(pair) or self._nado_price
+        self._grvt_price = await self._grvt.get_mark_price(pair) or self._grvt_price
+
         success = await self._execute_exit(pair)
+
+        if not success:
+            logger.warning("Exit failed, will retry next tick")
+            await self._telegram.send_alert(f"[⚠️ EXIT RETRY] {pair} 청산 재시도 예정")
+            self._save_state()
+            return
 
         nado_p = self._positions.get("nado")
         grvt_p = self._positions.get("grvt")
@@ -340,7 +350,7 @@ class DeltaNeutralBot:
 
         pos = nado_p or grvt_p
         notional = pos.notional if pos else 0
-        volume = notional * 2
+        grvt_volume = (grvt_p.notional * 2) if grvt_p else 0
 
         cycle = Cycle(
             cycle_id=self._state.cycle_id, pair=pair,
@@ -354,11 +364,11 @@ class DeltaNeutralBot:
             spread_pnl=nado_pnl + grvt_pnl,
             fee_cost=self._state.cumulative_fees,
             exit_reason=exit_reason,
-            volume_generated=volume,
+            volume_generated=grvt_volume,
         )
         self._log_jsonl("cycles.jsonl", json.loads(cycle.to_jsonl()))
         self._cycle_history.append(cycle)
-        self._earn.grvt_volume += volume
+        self._earn.grvt_volume += grvt_volume
         self._earn.grvt_trades += 2
 
         self._log_jsonl("volume_history.jsonl", {
@@ -376,7 +386,7 @@ class DeltaNeutralBot:
 
         await self._telegram.send_alert(
             f"[EXIT] {pair} | {exit_reason} | "
-            f"PnL: ${cycle.net_pnl:+.2f} | Vol: +${volume:,.0f}"
+            f"PnL: ${cycle.net_pnl:+.2f} | Vol: +${grvt_volume:,.0f}"
         )
 
         if len(self._cycle_history) >= 5:
@@ -474,7 +484,29 @@ class DeltaNeutralBot:
 
         nado_notional = nado_filled_cost
         grvt_notional = grvt_filled_cost
-        if nado_notional > 0 or grvt_notional > 0:
+        if nado_notional > 0 and grvt_notional > 0:
+            avg_notional = (nado_notional + grvt_notional) / 2
+            imbalance = abs(nado_notional - grvt_notional) / avg_notional if avg_notional > 0 else 0
+            if imbalance > 0.05:
+                logger.warning(f"Notional imbalance {imbalance:.1%}: NADO=${nado_notional:,.0f} GRVT=${grvt_notional:,.0f} — rolling back all")
+                await self._telegram.send_alert(f"[⚠️ IMBALANCE] {imbalance:.1%} — 전량 롤백")
+                await self._nado.cancel_all_orders(pair)
+                await self._grvt.cancel_all_orders(pair)
+                await asyncio.gather(
+                    self._nado.close_position(pair, nado_pos_side, nado_filled_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT),
+                    self._grvt.close_position(pair, grvt_pos_side, grvt_filled_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT),
+                )
+                return False
+        elif nado_notional > 0 and grvt_notional == 0:
+            logger.warning("Only NADO filled, GRVT empty — rolling back NADO")
+            await self._nado.close_position(pair, nado_pos_side, nado_filled_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT)
+            return False
+        elif grvt_notional > 0 and nado_notional == 0:
+            logger.warning("Only GRVT filled, NADO empty — rolling back GRVT")
+            await self._grvt.close_position(pair, grvt_pos_side, grvt_filled_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT)
+            return False
+
+        if nado_notional > 0 and grvt_notional > 0:
             nado_vwap = nado_filled_cost / nado_filled_qty if nado_filled_qty > 0 else 0
             grvt_vwap = grvt_filled_cost / grvt_filled_qty if grvt_filled_qty > 0 else 0
             nado_margin = nado_notional / self.cfg.LEVERAGE
@@ -696,7 +728,7 @@ class DeltaNeutralBot:
 
         async def on_stop():
             self._running = False
-            if self._state.cycle_state == CycleState.HOLD:
+            if self._positions and self._state.pair:
                 await self._execute_exit(self._state.pair)
             await self._telegram.send_alert("[⏹ STOP] 봇 종료")
             Path(".stop_bot").touch()
@@ -782,7 +814,6 @@ class DeltaNeutralBot:
             try:
                 await self._telegram.poll_updates()
                 await self._run_state_machine()
-                await self._check_earn_cycle()
 
                 now = time.time()
                 if now - self._last_balance_check > self.cfg.POLL_BALANCE_SECONDS:
