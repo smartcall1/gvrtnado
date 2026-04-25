@@ -8,6 +8,22 @@ from exchanges.base_client import BaseExchangeClient, OrderResult
 logger = logging.getLogger(__name__)
 
 
+def _patch_nado_eip712():
+    try:
+        import nado_protocol.contracts.eip712.sign as _sign_mod
+        from eth_account.messages import encode_typed_data
+        import inspect
+        sig = inspect.signature(encode_typed_data)
+        if "full_message" in sig.parameters and "domain_data" in sig.parameters:
+            _orig = encode_typed_data
+            def _compat(data):
+                return _orig(full_message=data)
+            _sign_mod.encode_typed_data = _compat
+            logger.debug("Patched nado EIP-712 signing for eth_account 0.13+")
+    except Exception:
+        pass
+
+
 class NadoClient(BaseExchangeClient):
     def __init__(self, private_key: str):
         self._private_key = private_key
@@ -22,6 +38,7 @@ class NadoClient(BaseExchangeClient):
         except ImportError:
             logger.error("nado-protocol SDK not installed. Run: pip install nado-protocol")
             raise
+        _patch_nado_eip712()
         from nado_protocol.utils.bytes32 import subaccount_to_hex
         self._subaccount_hex = subaccount_to_hex(
             self._client.context.signer.address, "default"
@@ -141,7 +158,7 @@ class NadoClient(BaseExchangeClient):
                 amount=amount_x18,
                 nonce=gen_order_nonce(),
                 priceX18=int(price * 1e18),
-                expiration=get_expiration_timestamp(),
+                expiration=get_expiration_timestamp(300),
                 appendix=0,
             )
 
