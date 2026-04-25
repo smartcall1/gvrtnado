@@ -13,6 +13,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+logging.getLogger("pysdk").setLevel(logging.WARNING)
+logging.getLogger("aiohttp").setLevel(logging.WARNING)
 
 from config import Config
 from models import (
@@ -136,7 +138,7 @@ class DeltaNeutralBot:
                 gd = await self._grvt.get_orderbook_depth(pair)
                 liquidities[pair] = min(nd, gd) if nd and gd else 0
             except Exception as e:
-                logger.debug(f"Pair scan {pair}: {e}")
+                logger.warning(f"Pair scan {pair}: {e}")
 
         best_pair = self._pair_mgr.best_pair(
             funding_spreads=funding_spreads,
@@ -818,6 +820,7 @@ class DeltaNeutralBot:
 
         await self._recovery_check()
 
+        self._last_status_log = 0.0
         while self._running:
             try:
                 await self._telegram.poll_updates()
@@ -828,6 +831,23 @@ class DeltaNeutralBot:
                     self._last_balance_check = now
                     self._state.nado_balance = await self._nado.get_balance()
                     self._state.grvt_balance = await self._grvt.get_balance()
+
+                if now - self._last_status_log > 60:
+                    self._last_status_log = now
+                    pos_str = ""
+                    if self._positions:
+                        parts = []
+                        for k, p in self._positions.items():
+                            parts.append(f"{k}:{p.side}/{p.size:.4f}@{p.entry_price:.1f}")
+                        pos_str = " | ".join(parts)
+                    else:
+                        pos_str = "none"
+                    logger.info(
+                        f"[STATUS] {self._state.cycle_state.value} | "
+                        f"mode={self._state.mode.value} | pair={self._state.pair} | "
+                        f"NADO=${self._state.nado_balance:.2f} GRVT=${self._state.grvt_balance:.2f} | "
+                        f"pos={pos_str}"
+                    )
 
                 await self._send_daily_report()
 
