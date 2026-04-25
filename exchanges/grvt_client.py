@@ -80,11 +80,13 @@ class GrvtClient(BaseExchangeClient):
         try:
             result = await self._retry(self._api.fetch_balance)
             if isinstance(result, dict):
-                for key in ("equity", "total", "free", "USDT"):
-                    if key in result:
-                        val = result[key]
-                        return float(val) if not isinstance(val, dict) else float(val.get("total", 0))
-            return float(result) if result else 0.0
+                usdt = result.get("USDT")
+                if isinstance(usdt, dict):
+                    return float(usdt.get("total", 0))
+                total = result.get("total")
+                if isinstance(total, dict):
+                    return float(total.get("USDT", 0))
+            return 0.0
         except Exception as e:
             logger.error(f"GRVT get_balance: {e}")
             return 0.0
