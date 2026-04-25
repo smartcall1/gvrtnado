@@ -74,6 +74,7 @@ class DeltaNeutralBot:
         self._cycle_history: list[Cycle] = []
         self._idle_since: float = 0.0
         self._enter_since: float = 0.0
+        self._oi_blocked: dict[str, float] = {}  # pair → unblock_at timestamp
 
     def _init_earn(self) -> EarnState:
         if self._state.earn:
@@ -120,14 +121,26 @@ class DeltaNeutralBot:
         elif state == CycleState.COOLDOWN:
             await self._handle_cooldown()
 
+    def _prune_oi_blocked(self):
+        now = time.time()
+        expired = [p for p, t in self._oi_blocked.items() if t <= now]
+        for p in expired:
+            del self._oi_blocked[p]
+
     async def _handle_idle(self):
         await self._check_earn_cycle()
         mode = self._determine_current_mode()
         self._state.mode = OperatingMode(mode)
 
+        self._prune_oi_blocked()
+        if self._oi_blocked:
+            logger.info(f"[IDLE] OI blocked pairs: {list(self._oi_blocked.keys())}")
+
         funding_spreads = {}
         liquidities = {}
         for pair in self._pair_mgr.common_pairs:
+            if pair in self._oi_blocked:
+                continue
             try:
                 nr = await self._nado.get_funding_rate(pair)
                 gr = await self._grvt.get_funding_rate(pair)
@@ -246,8 +259,12 @@ class DeltaNeutralBot:
         result = await self._execute_enter(pair, direction, notional)
 
         if result == "nado_max_oi":
-            logger.warning(f"[ENTER] NADO {pair} max OI reached — skipping")
-            await self._telegram.send_alert(f"[⛔ MAX OI] NADO {pair} OI 한도 도달 — 진입 불가")
+            self._oi_blocked[pair] = time.time() + 3600
+            logger.warning(f"[ENTER] NADO {pair} max OI — 1시간 차단, 다음 마켓 탐색")
+            await self._telegram.send_alert(f"[⛔ MAX OI] NADO {pair} OI 한도 — 1h 차단, 다른 마켓 탐색")
+            self._state.cycle_state = CycleState.IDLE
+            self._save_state()
+            return
         elif result == "nado_health":
             reduced = notional * 0.4
             if reduced >= self.cfg.MIN_NOTIONAL:
