@@ -36,7 +36,10 @@ class GrvtClient(BaseExchangeClient):
 
     async def connect(self):
         try:
-            from grvt_pysdk import GrvtCcxtWS
+            try:
+                from pysdk import GrvtCcxtWS
+            except ImportError:
+                from grvt_pysdk import GrvtCcxtWS
             self._api = GrvtCcxtWS(
                 env="prod",
                 private_key=self._private_key,
@@ -46,7 +49,7 @@ class GrvtClient(BaseExchangeClient):
             await asyncio.to_thread(self._api.login)
             logger.info("GRVT connected and logged in")
         except ImportError:
-            logger.error("grvt-pysdk not installed. Run: pip install grvt-pysdk")
+            logger.error("grvt-pysdk not installed. Run: pip install grvt-pysdk (module: pysdk)")
             raise
 
     async def close(self):
