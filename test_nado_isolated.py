@@ -12,7 +12,14 @@ load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-CANDIDATES = ["AAPL", "NVDA", "MSFT", "META", "GOOGL", "AMZN", "TSLA", "QQQ", "SPY"]
+CANDIDATES = [
+    # crypto (isolated-only 가능성 있는 것들)
+    "HYPE", "MON", "DOGE", "SUI", "AAVE", "PUMP", "TAO",
+    "PENGU", "FARTCOIN", "KPEPE", "KBONK", "BERA", "VIRTUAL",
+    "LIT", "XPL", "ASTER", "WLFI", "SKR", "USELESS",
+    # stocks/ETFs
+    "AAPL", "NVDA", "MSFT", "META", "GOOGL", "AMZN", "TSLA",
+]
 
 
 async def try_symbol(client, sym, balance):
