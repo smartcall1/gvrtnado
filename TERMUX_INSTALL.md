@@ -24,8 +24,15 @@ pip install --upgrade pip setuptools wheel
 git clone https://github.com/smartcall1/gvrtnado.git
 cd gvrtnado
 
-# 의존성 설치 (Termux에서 빌드 시간 소요될 수 있음)
+# 공통 의존성
 pip install -r requirements.txt
+
+# SDK 설치 (eth-account 버전 충돌 때문에 순서 중요)
+pip install grvt-pysdk>=0.2.0
+pip install nado-protocol>=0.1.0 --no-deps
+
+# nado-protocol 호환성 패치
+python fix_deps.py
 ```
 
 ### 빌드 에러 발생 시
