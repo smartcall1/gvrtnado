@@ -140,11 +140,20 @@ class DeltaNeutralBot:
             except Exception as e:
                 logger.warning(f"Pair scan {pair}: {e}")
 
+        if funding_spreads:
+            top = sorted(funding_spreads.items(), key=lambda x: x[1], reverse=True)[:5]
+            logger.info(f"[IDLE] funding spreads (top5): {[(p, f'{s:.6f}') for p, s in top]}")
+            liq_valid = {p: f'${v:,.0f}' for p, v in liquidities.items() if v > 0}
+            logger.info(f"[IDLE] liquidity: {liq_valid}")
+        else:
+            logger.warning("[IDLE] No funding spreads found for any pair")
+
         best_pair = self._pair_mgr.best_pair(
             funding_spreads=funding_spreads,
             liquidities=liquidities,
             min_liquidity=self.cfg.MIN_NOTIONAL * 10,
         )
+        logger.info(f"[IDLE] selected pair: {best_pair}")
         self._state.pair = best_pair
         self._state.cycle_state = CycleState.ANALYZE
         self._save_state()
