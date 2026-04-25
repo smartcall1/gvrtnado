@@ -1,4 +1,4 @@
-# grvtnado.py
+# nado_grvt_engine.py
 import asyncio
 import json
 import logging
@@ -8,6 +8,11 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 from config import Config
 from models import (
@@ -785,8 +790,11 @@ class DeltaNeutralBot:
             return
 
         self._running = True
+        logger.info("Connecting to NADO...")
         await self._nado.connect()
+        logger.info("Connecting to GRVT...")
         await self._grvt.connect()
+        logger.info("Both exchanges connected")
 
         nado_pairs = await self._nado.get_available_pairs()
         grvt_pairs = await self._grvt.get_available_pairs()
