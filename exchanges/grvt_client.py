@@ -36,10 +36,7 @@ class GrvtClient(BaseExchangeClient):
 
     async def connect(self):
         try:
-            try:
-                from pysdk import GrvtCcxtWS
-            except ImportError:
-                from grvt_pysdk import GrvtCcxtWS
+            from pysdk.grvt_ccxt_ws import GrvtCcxtWS
             self._api = GrvtCcxtWS(
                 env="prod",
                 private_key=self._private_key,
