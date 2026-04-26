@@ -1044,7 +1044,10 @@ class DeltaNeutralBot:
 
                 if real_pnl is not None:
                     pnl_emoji = "🟢" if real_pnl >= 0 else "🔴"
+                    nado_upnl = nado_pos.calc_unrealized_pnl(nado_curr) if nado_curr > 0 else 0.0
+                    grvt_upnl = grvt_pos.calc_unrealized_pnl(grvt_curr) if grvt_curr > 0 else 0.0
                     lines.append(f"💰 <b>${total_bal:,.0f}</b> {pnl_emoji} <b>${real_pnl:+,.2f}</b>")
+                    lines.append(f"   <i>미실현  N ${nado_upnl:+,.2f} / G ${grvt_upnl:+,.2f}</i>")
                     lines.append(f"   진입 ${self._state.entry_total_balance:,.0f}")
                     if not self._state.entry_baseline_real:
                         lines.append(f"   ⚠️ baseline 임시")
