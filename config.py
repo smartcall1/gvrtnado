@@ -49,11 +49,10 @@ class Config:
         self.SPREAD_STOPLOSS = float(os.getenv("SPREAD_STOPLOSS", "-30"))  # USD
         self.MAX_HOLD_DAYS = int(os.getenv("MAX_HOLD_DAYS", "4"))
         # URGENT break-even 임계값 — 청산 슬리피지 흡수용.
-        # 직전 관측: real_pnl ≥ 0 즉시 청산 → 슬리피지 -$4.64 손실 확정
-        # 기본 5: 양쪽 합 슬리피지 ~$3-5 흡수, 최종 0+ 보장 가능성 ↑
+        # 기본 3: 절충 — 평균 -$1 ~ +$3, 가끔 작은 손실 인정, volume 회전 보통
         # 0: 정확히 본전 트리거 (확정 손실 위험)
-        # 10+: 보수적 (대부분 cycle이 spread_exit으로 끝남, URGENT 발동 적음)
-        self.URGENT_BREAK_EVEN_THRESHOLD = float(os.getenv("URGENT_BREAK_EVEN_THRESHOLD", "5"))
+        # 5+: 안전하지만 spread_exit(+$6)과 거의 중복, URGENT 발동 드묾
+        self.URGENT_BREAK_EVEN_THRESHOLD = float(os.getenv("URGENT_BREAK_EVEN_THRESHOLD", "3"))
 
         # ===== 모니터링 및 안전 설정 =====
         self.POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "3"))  # 초
