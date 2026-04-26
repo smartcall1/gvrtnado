@@ -92,16 +92,36 @@ class GrvtClient(BaseExchangeClient):
                     raise
 
     async def get_balance(self) -> float:
+        # fetch_balance.total = wallet only (포지션 미실현 PnL 미포함).
+        # 정확한 equity = wallet + Σ(open positions.unrealized_pnl)
         try:
             result = await self._retry(self._api.fetch_balance)
+            wallet = 0.0
             if isinstance(result, dict):
                 usdt = result.get("USDT")
                 if isinstance(usdt, dict):
-                    return float(usdt.get("total", 0))
-                total = result.get("total")
-                if isinstance(total, dict):
-                    return float(total.get("USDT", 0))
-            return 0.0
+                    wallet = float(usdt.get("total", 0))
+                else:
+                    total = result.get("total")
+                    if isinstance(total, dict):
+                        wallet = float(total.get("USDT", 0))
+            upnl = 0.0
+            try:
+                poss = await self._retry(self._api.fetch_positions)
+                for p in poss or []:
+                    # GRVT raw 응답은 snake_case 'unrealized_pnl' 를 최상위에 둠
+                    v = p.get("unrealizedPnl")
+                    if v is None:
+                        v = p.get("unrealized_pnl")
+                    if v is None:
+                        info = p.get("info") or {}
+                        if isinstance(info, dict):
+                            v = info.get("unrealized_pnl")
+                    if v not in (None, ""):
+                        upnl += float(v)
+            except Exception as e:
+                logger.warning(f"GRVT get_balance upnl fetch: {e}")
+            return wallet + upnl
         except Exception as e:
             logger.error(f"GRVT get_balance: {e}")
             return 0.0

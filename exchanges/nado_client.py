@@ -107,14 +107,17 @@ class NadoClient(BaseExchangeClient):
         return pid
 
     async def get_balance(self) -> float:
-        # SubaccountInfoData.healths[0].assets is x18 string
+        # healths schema: [0]=initial_weighted, [1]=maintenance_weighted, [2]=unweighted.
+        # unweighted.health = collateral + 모든 perp 미실현 PnL → 진짜 equity
         try:
             info = await asyncio.to_thread(
                 self._client.subaccount.get_engine_subaccount_summary,
                 self._subaccount_hex,
             )
+            if info and info.healths and len(info.healths) >= 3:
+                return int(info.healths[2].health) / 1e18
             if info and info.healths:
-                return int(info.healths[0].assets) / 1e18
+                return int(info.healths[0].assets) / 1e18  # legacy fallback
         except Exception as e:
             logger.error(f"NADO get_balance: {e}")
         return 0.0
