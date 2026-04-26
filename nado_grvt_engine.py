@@ -952,11 +952,11 @@ class DeltaNeutralBot:
             nado_bal = self._state.nado_balance
             grvt_bal = self._state.grvt_balance
 
-            # 헤더: 상태 + 페어 + 보유시간을 한 줄로
+            # 헤더: 상태 + 페어 + 보유시간을 한 줄로 (한글 단위 통일)
             hold_seconds = (time.time() - self._state.entered_at) if (self._state.entered_at and nado_pos and grvt_pos) else 0
             hold_str = ""
             if hold_seconds > 0:
-                hold_str = f" · 보유 {hold_seconds/3600:.1f}h" if hold_seconds >= 3600 else f" · 보유 {int(hold_seconds/60)}분"
+                hold_str = f" · 보유 {hold_seconds/3600:.1f}시간" if hold_seconds >= 3600 else f" · 보유 {int(hold_seconds/60)}분"
 
             boost = self._pair_mgr.get_boost(pair)
             boost_str = ""
@@ -1021,7 +1021,9 @@ class DeltaNeutralBot:
                         lines.append("")
                         lines.append(f"📈 펀딩 8h(decimal): N {nado_8h:+.6f} / G {grvt_8h:+.6f}")
                         lines.append(f"   {apr_emoji} 스프레드 {rate_diff:+.6f} (연 APR {apr:+.1f}%)")
-                        lines.append(f"   다음 정산: N {nado_min}분 / G {grvt_min//60}h{grvt_min%60}m")
+                        gh, gm = grvt_min // 60, grvt_min % 60
+                        grvt_next_str = f"{gh}시간 {gm}분" if gh > 0 else f"{gm}분"
+                        lines.append(f"   다음 정산: N {nado_min}분 / G {grvt_next_str}")
                 except Exception as e:
                     logger.debug(f"Status funding fetch: {e}")
 
@@ -1046,8 +1048,9 @@ class DeltaNeutralBot:
                     mp = self.cfg.mode_params(mode)
                     min_hold_sec = mp['min_hold_hours'] * 3600
                     min_remaining = max(0, min_hold_sec - hold_seconds)
-                    min_str = "✓" if min_remaining == 0 else (f"{min_remaining/3600:.1f}h" if min_remaining >= 3600 else f"{int(min_remaining/60)}분")
+                    min_str = "✓" if min_remaining == 0 else (f"{min_remaining/3600:.1f}시간" if min_remaining >= 3600 else f"{int(min_remaining/60)}분")
                     max_remaining_h = max(0, self.cfg.MAX_HOLD_DAYS * 86400 - hold_seconds) / 3600
+                    max_str = f"{max_remaining_h/24:.1f}일" if max_remaining_h >= 24 else f"{max_remaining_h:.0f}시간"
                     # 청산 트리거 비교값: real_pnl 우선, 없으면 spread_mtm
                     trigger_pnl = real_pnl if real_pnl is not None else spread_mtm
                     progress = (trigger_pnl / mp['spread_exit'] * 100) if (mp['spread_exit'] > 0 and trigger_pnl > 0) else 0
@@ -1056,7 +1059,7 @@ class DeltaNeutralBot:
                     lines.append(f"⏱ 익절 ≥ +${mp['spread_exit']:.0f} ({progress:.0f}%) · 손절 ≤ ${self.cfg.SPREAD_STOPLOSS:.0f}")
                     if mode == "VOLUME_URGENT" and real_pnl is not None:
                         lines.append(f"   URGENT 본전청산: 실잔고 PnL ≥ +${self.cfg.URGENT_BREAK_EVEN_THRESHOLD:.0f} (현재 ${real_pnl:+.2f})")
-                    lines.append(f"   min_hold {mp['min_hold_hours']:.1f}h ({min_str}) · max_hold {max_remaining_h:.0f}h 남음")
+                    lines.append(f"   min_hold {mp['min_hold_hours']:.1f}시간 ({min_str}) · max_hold {max_str} 남음")
                 except Exception:
                     pass
 
