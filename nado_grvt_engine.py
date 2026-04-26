@@ -338,6 +338,22 @@ class DeltaNeutralBot:
         grvt_pnl = self._positions["grvt"].calc_unrealized_pnl(self._grvt_price) if "grvt" in self._positions and self._grvt_price else 0
         spread_mtm = nado_pnl + grvt_pnl
 
+        # 픽스 적용 전 진입했거나 recovery로 baseline이 0이면 현재 잔고를 baseline으로 fallback
+        # (정확한 entry baseline은 못 살리지만, 그 시점부터 본전 추적은 가능)
+        if (
+            self._state.entry_total_balance <= 0
+            and "nado" in self._positions
+            and "grvt" in self._positions
+            and self._state.nado_balance > 0
+            and self._state.grvt_balance > 0
+        ):
+            self._state.entry_total_balance = self._state.nado_balance + self._state.grvt_balance
+            logger.info(
+                f"entry_total_balance fallback: 현재 잔고 ${self._state.entry_total_balance:.2f}로 초기화 "
+                f"(정확한 진입 baseline 미보유, 지금부터 변동 추적)"
+            )
+            self._save_state()
+
         mode_params = self.cfg.mode_params(self._state.mode.value)
 
         # 실잔고 기반 PnL — entry_total_balance 진입 직전 스냅샷과 비교 (가장 정확)
@@ -974,8 +990,8 @@ class DeltaNeutralBot:
                         grvt_min = max(0, int((next_grvt_dt - now_utc).total_seconds() / 60))
 
                         lines.append("")
-                        lines.append(f"📈 펀딩 8h: N {nado_8h:+.4f} / G {grvt_8h:+.4f}")
-                        lines.append(f"   {apr_emoji} 스프레드 {rate_diff:+.4f} (연 APR {apr:+.0f}%)")
+                        lines.append(f"📈 펀딩 8h(decimal): N {nado_8h:+.6f} / G {grvt_8h:+.6f}")
+                        lines.append(f"   {apr_emoji} 스프레드 {rate_diff:+.6f} (연 APR {apr:+.1f}%)")
                         lines.append(f"   다음 정산: N {nado_min}분 / G {grvt_min//60}h{grvt_min%60}m")
                 except Exception as e:
                     logger.debug(f"Status funding fetch: {e}")
