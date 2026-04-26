@@ -380,9 +380,10 @@ class DeltaNeutralBot:
         if now - self._last_funding_check > self.cfg.POLL_FUNDING_SECONDS:
             delta_seconds = now - self._last_funding_check
             self._last_funding_check = now
-            # Sanity clamp: 1시간 이상 갭은 재시작/시계오류로 간주, 누적 스킵
-            if delta_seconds > 3600:
-                logger.warning(f"Funding check delta {delta_seconds:.0f}s 비정상, 누적 스킵")
+            # Sanity clamp: 폴링 주기의 3배 초과면 재시작/시계오류로 간주, 누적 스킵
+            # (POLL_FUNDING_SECONDS=3600일 때 임계 3시간)
+            if delta_seconds > self.cfg.POLL_FUNDING_SECONDS * 3:
+                logger.warning(f"Funding check delta {delta_seconds:.0f}s 비정상(폴링주기×3 초과), 누적 스킵")
             else:
                 elapsed_hours = delta_seconds / 3600
                 nado_rate = await self._nado.get_funding_rate(pair)
