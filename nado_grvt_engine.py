@@ -339,7 +339,8 @@ class DeltaNeutralBot:
         spread_mtm = nado_pnl + grvt_pnl
 
         # 픽스 적용 전 진입했거나 recovery로 baseline이 0이면 현재 잔고를 baseline으로 fallback
-        # (정확한 entry baseline은 못 살리지만, 그 시점부터 본전 추적은 가능)
+        # (정확한 entry baseline은 못 살리지만, 그 시점부터 변동 추적용 — display 전용)
+        # entry_baseline_real=False라서 URGENT break-even 트리거는 발동 안 함 (확정 손실 방지)
         if (
             self._state.entry_total_balance <= 0
             and "nado" in self._positions
@@ -348,9 +349,10 @@ class DeltaNeutralBot:
             and self._state.grvt_balance > 0
         ):
             self._state.entry_total_balance = self._state.nado_balance + self._state.grvt_balance
+            self._state.entry_baseline_real = False  # fallback이므로 URGENT 트리거 차단
             logger.info(
                 f"entry_total_balance fallback: 현재 잔고 ${self._state.entry_total_balance:.2f}로 초기화 "
-                f"(정확한 진입 baseline 미보유, 지금부터 변동 추적)"
+                f"(display 전용, URGENT break-even 트리거는 차단됨)"
             )
             self._save_state()
 
@@ -382,7 +384,13 @@ class DeltaNeutralBot:
                 self._save_state()
                 return
             # 2) URGENT 모드만: 본전 회복(real_pnl ≥ 0)이면 청산 (회전율 우선)
-            if self._state.mode == OperatingMode.VOLUME_URGENT and real_pnl is not None and real_pnl >= 0:
+            # 단, baseline이 진짜 진입 시점일 때만 (fallback baseline은 확정 손실 회피 위해 차단)
+            if (
+                self._state.mode == OperatingMode.VOLUME_URGENT
+                and self._state.entry_baseline_real
+                and real_pnl is not None
+                and real_pnl >= 0
+            ):
                 self._state.cycle_state = CycleState.EXIT
                 self._state.exit_reason = "break_even"
                 self._save_state()
@@ -508,6 +516,7 @@ class DeltaNeutralBot:
 
         # cycle 끝 → 다음 cycle 위해 entry baseline 리셋
         self._state.entry_total_balance = 0.0
+        self._state.entry_baseline_real = False
         self._log_jsonl("cycles.jsonl", json.loads(cycle.to_jsonl()))
         self._cycle_history.append(cycle)
         self._earn.grvt_volume += grvt_volume
@@ -559,9 +568,11 @@ class DeltaNeutralBot:
             pre_nado = await self._nado.get_balance()
             pre_grvt = await self._grvt.get_balance()
             self._state.entry_total_balance = pre_nado + pre_grvt
+            self._state.entry_baseline_real = True  # 진짜 진입 baseline
         except Exception as e:
             logger.warning(f"진입 전 잔고 스냅샷 실패: {e}")
             self._state.entry_total_balance = self._state.nado_balance + self._state.grvt_balance
+            self._state.entry_baseline_real = True  # 잔고 스냅샷 실패해도 추정 baseline은 진입 시점
 
         chunk_size = notional / self.cfg.ENTRY_CHUNKS
         nado_side = "BUY" if direction == "A" else "SELL"
@@ -1004,7 +1015,10 @@ class DeltaNeutralBot:
                 lines.append("")
                 if real_pnl is not None:
                     real_emoji = "🟢" if real_pnl >= 0 else "🔴"
-                    lines.append(f"💰 실잔고 PnL: {real_emoji} <b>${real_pnl:+,.2f}</b>  (진입 ${self._state.entry_total_balance:,.0f} 대비)")
+                    if self._state.entry_baseline_real:
+                        lines.append(f"💰 실잔고 PnL: {real_emoji} <b>${real_pnl:+,.2f}</b>  (진입 ${self._state.entry_total_balance:,.0f} 대비)")
+                    else:
+                        lines.append(f"💰 변동(fallback): {real_emoji} <b>${real_pnl:+,.2f}</b>  ⚠️ 진입 baseline 미보유 (URGENT 청산 차단)")
                     lines.append(f"   추정 분해: 스프레드 ${spread_mtm:+,.2f} + 펀딩 ${funding:+,.2f} - 수수료 ${fees:,.2f} = ${net_pnl:+,.2f}")
                 else:
                     lines.append(f"💰 PnL: {pnl_emoji} <b>${net_pnl:+,.2f}</b> <i>(추정치, 실잔고 baseline 미초기화)</i>")
