@@ -265,12 +265,20 @@ class NadoClient(BaseExchangeClient):
                 digest = ""
                 if result.data and hasattr(result.data, 'digest'):
                     digest = str(result.data.digest)
-                # 슬리피지 포함된 limit 가격을 entry로 사용 — 보수적이고 GRVT side와 회계 일관성 (C-3)
+                # entry_price = mark (체결 시점). limit은 슬리피지 포함이라 spread_mtm 과장 표시함.
+                # 실제 체결가는 mark에 가까움. 진짜 슬리피지 비용은 real_pnl(잔고 기반)에서 자동 반영.
+                actual_price = price  # fallback: limit
+                try:
+                    mark = await self.get_mark_price(symbol)
+                    if mark and mark > 0:
+                        actual_price = mark
+                except Exception:
+                    pass
                 return OrderResult(
                     order_id=digest,
                     status="filled" if "success" in status_str else status_str,
                     filled_size=size,
-                    filled_price=price,
+                    filled_price=actual_price,
                 )
         except Exception as e:
             err_str = str(e)

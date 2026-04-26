@@ -260,11 +260,21 @@ class GrvtClient(BaseExchangeClient):
                 if not self._is_filled(status, filled):
                     logger.warning(f"GRVT {symbol} order final status={status}, result={result}")
                 is_done = self._is_filled(status, filled)
+                # entry_price = mark (체결 시점). limit은 슬리피지 포함이라 spread_mtm 과장 표시함.
+                # 실제 체결가는 mark에 가까움. 진짜 슬리피지 비용은 real_pnl(잔고 기반)에서 자동 반영.
+                actual_price = price
+                if is_done:
+                    try:
+                        mark = await self.get_mark_price(symbol)
+                        if mark and mark > 0:
+                            actual_price = mark
+                    except Exception:
+                        pass
                 return OrderResult(
                     order_id=coid,
                     status="filled" if is_done else status,
                     filled_size=(filled if filled > 0 else size) if is_done else 0.0,
-                    filled_price=price,
+                    filled_price=actual_price,
                     message=f"grvt_status={status}",
                 )
             else:
