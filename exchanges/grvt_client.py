@@ -126,6 +126,25 @@ class GrvtClient(BaseExchangeClient):
             logger.error(f"GRVT get_balance: {e}")
             return 0.0
 
+    async def get_cumulative_fees(self) -> float:
+        # 모든 미체결 포지션의 cumulative_fee 합 — 진입 + 부분청산 등 실제 누적 수수료.
+        # config의 maker BPS 추정값과 다를 수 있음 (실제 fill이 taker일 가능성).
+        try:
+            poss = await self._retry(self._api.fetch_positions)
+            total = 0.0
+            for p in poss or []:
+                v = p.get("cumulative_fee")
+                if v in (None, ""):
+                    info = p.get("info") or {}
+                    if isinstance(info, dict):
+                        v = info.get("cumulative_fee")
+                if v not in (None, ""):
+                    total += float(v)
+            return total
+        except Exception as e:
+            logger.warning(f"GRVT get_cumulative_fees: {e}")
+            return 0.0
+
     async def get_positions(self, symbol: str) -> list[dict]:
         # GRVT raw response uses 'size' (signed), 'entry_price', 'notional' — NOT
         # CCXT-translated 'contracts'/'entryPrice'. Parse raw fields with CCXT fallback.

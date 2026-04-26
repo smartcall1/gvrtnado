@@ -300,7 +300,9 @@ class DeltaNeutralBot:
             self._state.cycle_id = str(uuid.uuid4())[:8]
             self._state.entered_at = time.time()
             self._state.cumulative_funding = 0.0
-            self._state.cumulative_fees = self.cfg.estimate_round_trip_fee(notional)
+            # 진입 직후엔 NADO 진입 측 추정만(maker) 잡고, GRVT는 다음 잔고 폴링에서 API 실제값으로 갱신.
+            # 청산 시점에 NADO 라운드트립 + GRVT 실제 누적으로 재집계 (_handle_exit).
+            self._state.cumulative_fees = notional * self.cfg.NADO_MAKER_FEE_BPS / 10_000
             self._last_funding_check = time.time()
             self._state.nado_balance = nado_bal
             self._state.grvt_balance = grvt_bal
@@ -517,6 +519,20 @@ class DeltaNeutralBot:
             post_grvt = self._state.grvt_balance
         post_total = post_nado + post_grvt
         real_cycle_pnl = (post_total - self._state.entry_total_balance) if self._state.entry_total_balance > 0 else 0.0
+
+        # cumulative_fees 청산 후 재집계 — NADO는 라운드트립 추정, GRVT는 청산 직후 실제 누적.
+        # GRVT 포지션이 종료되면 fetch_positions에서 빠질 수 있으니 0이면 기존값 유지.
+        try:
+            nado_round_trip_est = notional * self.cfg.NADO_MAKER_FEE_BPS / 10_000 * 2
+            grvt_post = await self._grvt.get_cumulative_fees()
+            if grvt_post > 0:
+                self._state.cumulative_fees = nado_round_trip_est + grvt_post
+            else:
+                # GRVT가 0 반환 = 포지션 종결로 응답에서 제거된 듯. 마지막 HOLD 갱신값 + NADO 청산 측 추가.
+                prev_grvt_part = max(0.0, self._state.cumulative_fees - notional * self.cfg.NADO_MAKER_FEE_BPS / 10_000)
+                self._state.cumulative_fees = nado_round_trip_est + prev_grvt_part
+        except Exception as e:
+            logger.debug(f"exit fee sync: {e}")
 
         cycle = Cycle(
             cycle_id=self._state.cycle_id, pair=pair,
@@ -1251,6 +1267,16 @@ class DeltaNeutralBot:
                         self._last_balance_check = now
                         self._state.nado_balance = await self._nado.get_balance()
                         self._state.grvt_balance = await self._grvt.get_balance()
+                        # cumulative_fees 실시간 동기화 — GRVT는 API 누적값, NADO는 진입 측 추정.
+                        # HOLD 중에는 진입 fee만 발생 (청산 시 _handle_exit에서 라운드트립으로 재집계)
+                        if self._positions and self._state.cycle_state == CycleState.HOLD:
+                            try:
+                                pos = next(iter(self._positions.values()))
+                                nado_entry_est = pos.notional * self.cfg.NADO_MAKER_FEE_BPS / 10_000
+                                grvt_real = await self._grvt.get_cumulative_fees()
+                                self._state.cumulative_fees = nado_entry_est + grvt_real
+                            except Exception as e:
+                                logger.debug(f"fee sync: {e}")
                         # 잔고도 메모리 갱신 후 디스크 동기화 (5분 주기, 부담 없음)
                         self._save_state()
 
