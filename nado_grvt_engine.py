@@ -694,23 +694,45 @@ class DeltaNeutralBot:
             if i < chunks - 1:
                 await asyncio.sleep(self.cfg.CHUNK_WAIT)
 
+        # Dust threshold: 양쪽 어느 쪽 잔존 notional이 $1 미만이면 dust로 간주, 청산 성공으로 처리
+        # (거래소 min_notional 미달로 close 주문이 거부되어 무한 retry 루프 방지)
+        DUST_NOTIONAL_USD = 1.0
+
         for attempt in range(3):
             await asyncio.sleep(5)
             nado_remaining = await self._nado.get_positions(pair)
             grvt_remaining = await self._grvt.get_positions(pair)
-            if not nado_remaining and not grvt_remaining:
+
+            nado_curr = await self._nado.get_mark_price(pair) or self._nado_price or 0
+            grvt_curr = await self._grvt.get_mark_price(pair) or self._grvt_price or 0
+
+            def _live_size(positions, price):
+                if not positions:
+                    return 0, 0.0
+                size = abs(float(positions[0].get("size", positions[0].get("amount", positions[0].get("contracts", 0)))))
+                return size, size * price
+
+            nado_size, nado_notional = _live_size(nado_remaining, nado_curr)
+            grvt_size, grvt_notional = _live_size(grvt_remaining, grvt_curr)
+
+            nado_dust = nado_notional < DUST_NOTIONAL_USD
+            grvt_dust = grvt_notional < DUST_NOTIONAL_USD
+
+            if (not nado_remaining or nado_dust) and (not grvt_remaining or grvt_dust):
+                if nado_dust or grvt_dust:
+                    logger.info(f"Exit dust treated as closed: nado=${nado_notional:.2f}, grvt=${grvt_notional:.2f}")
+                    await self._telegram.send_alert(
+                        f"[ℹ️ DUST] {pair} 잔존 dust (nado=${nado_notional:.2f}, grvt=${grvt_notional:.2f}) — 청산 완료로 처리"
+                    )
                 return True
-            logger.warning(f"Exit retry {attempt+1}/3: positions remain (nado={len(nado_remaining)}, grvt={len(grvt_remaining)})")
-            for rp in nado_remaining:
-                size = abs(float(rp.get("size", rp.get("amount", 0))))
-                side = rp.get("side", "LONG").upper()
-                if size > 0:
-                    await self._nado.close_position(pair, side, size, self.cfg.EMERGENCY_SLIPPAGE_PCT)
-            for rp in grvt_remaining:
-                size = abs(float(rp.get("size", rp.get("contracts", 0))))
-                side = rp.get("side", "LONG").upper()
-                if size > 0:
-                    await self._grvt.close_position(pair, side, size, self.cfg.EMERGENCY_SLIPPAGE_PCT)
+
+            logger.warning(f"Exit retry {attempt+1}/3: nado=${nado_notional:.2f}({nado_size}) grvt=${grvt_notional:.2f}({grvt_size})")
+            if nado_remaining and not nado_dust:
+                side = (nado_remaining[0].get("side") or "LONG").upper()
+                await self._nado.close_position(pair, side, nado_size, self.cfg.EMERGENCY_SLIPPAGE_PCT)
+            if grvt_remaining and not grvt_dust:
+                side = (grvt_remaining[0].get("side") or "LONG").upper()
+                await self._grvt.close_position(pair, side, grvt_size, self.cfg.EMERGENCY_SLIPPAGE_PCT)
         return False
 
     async def _emergency_exit(self, reason: str):
