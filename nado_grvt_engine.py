@@ -383,13 +383,14 @@ class DeltaNeutralBot:
                 self._state.exit_reason = "spread_profit"
                 self._save_state()
                 return
-            # 2) URGENT 모드만: 본전 회복(real_pnl ≥ 0)이면 청산 (회전율 우선)
+            # 2) URGENT 모드: real_pnl ≥ URGENT_BREAK_EVEN_THRESHOLD (기본 +$1) 청산
             # 단, baseline이 진짜 진입 시점일 때만 (fallback baseline은 확정 손실 회피 위해 차단)
+            # 임계 +$1은 청산 슬리피지 흡수 마진. 정확히 본전 청산 원하면 ENV로 0으로 조정
             if (
                 self._state.mode == OperatingMode.VOLUME_URGENT
                 and self._state.entry_baseline_real
                 and real_pnl is not None
-                and real_pnl >= 0
+                and real_pnl >= self.cfg.URGENT_BREAK_EVEN_THRESHOLD
             ):
                 self._state.cycle_state = CycleState.EXIT
                 self._state.exit_reason = "break_even"
@@ -1037,7 +1038,7 @@ class DeltaNeutralBot:
                     lines.append("")
                     lines.append(f"⏱ 익절 ≥ +${mp['spread_exit']:.0f} ({progress:.0f}%) · 손절 ≤ ${self.cfg.SPREAD_STOPLOSS:.0f}")
                     if mode == "VOLUME_URGENT" and real_pnl is not None:
-                        lines.append(f"   URGENT 본전청산: 실잔고 PnL ≥ \\$0 (현재 ${real_pnl:+.2f})")
+                        lines.append(f"   URGENT 본전청산: 실잔고 PnL ≥ +${self.cfg.URGENT_BREAK_EVEN_THRESHOLD:.0f} (현재 ${real_pnl:+.2f})")
                     lines.append(f"   min_hold {mp['min_hold_hours']:.1f}h ({min_str}) · max_hold {max_remaining_h:.0f}h 남음")
                 except Exception:
                     pass

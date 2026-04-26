@@ -48,6 +48,9 @@ class Config:
         self.SPREAD_EXIT_HOLD = float(os.getenv("SPREAD_EXIT_HOLD", "50"))  # USD
         self.SPREAD_STOPLOSS = float(os.getenv("SPREAD_STOPLOSS", "-30"))  # USD
         self.MAX_HOLD_DAYS = int(os.getenv("MAX_HOLD_DAYS", "4"))
+        # URGENT break-even 임계값 — 청산 슬리피지 흡수용. 0이면 정확히 본전이지만
+        # 청산 슬리피지로 -2~-5 손실 확정 가능. 1+ 권장 (청산 후 ~0 정도 마무리)
+        self.URGENT_BREAK_EVEN_THRESHOLD = float(os.getenv("URGENT_BREAK_EVEN_THRESHOLD", "1"))
 
         # ===== 모니터링 및 안전 설정 =====
         self.POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "3"))  # 초
