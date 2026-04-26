@@ -1186,10 +1186,18 @@ class DeltaNeutralBot:
         await self._nado.set_leverage(self._state.pair or self.cfg.PAIR_DEFAULT, self.cfg.LEVERAGE)
 
         await self._register_telegram_handlers()
+        # 시작 시 활성 포지션 있는지에 따라 메시지 다르게
+        has_position = bool(self._positions) or self._state.cycle_state in (
+            CycleState.HOLD, CycleState.ENTER, CycleState.EXIT
+        )
+        if has_position:
+            pair_line = f"페어: {self._state.pair} (포지션 보유 중)"
+        else:
+            pair_line = f"이전 페어: {self._state.pair or 'N/A'} | 다음 IDLE에서 새 페어 탐색"
         await self._telegram.send_message(
             f"[🚀 START] NADO×GRVT 봇 가동\n"
-            f"페어: {self._state.pair} | 레버리지: {self.cfg.LEVERAGE}x\n"
-            f"모드: {self._state.mode.value}"
+            f"{pair_line}\n"
+            f"레버리지: {self.cfg.LEVERAGE}x | 모드: {self._state.mode.value}"
         )
 
         await self._recovery_check()
