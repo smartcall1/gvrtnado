@@ -760,8 +760,12 @@ class DeltaNeutralBot:
             grvt_entry = float(gp.get("entry_price", 0))
             nado_size = float(np.get("size", np.get("amount", 0)))
             grvt_size = float(gp.get("size", gp.get("contracts", 0)))
-            nado_side = "LONG" if nado_size > 0 else "SHORT"
-            grvt_side = "LONG" if gp.get("side", "").upper() == "LONG" else "SHORT"
+            # 두 클라이언트 모두 size=abs(), side="LONG"/"SHORT" 반환 — side 필드 사용
+            nado_side = (np.get("side") or "").upper()
+            grvt_side = (gp.get("side") or "").upper()
+            if nado_side not in ("LONG", "SHORT") or grvt_side not in ("LONG", "SHORT"):
+                logger.error(f"Recovery: invalid side fields nado={nado_side} grvt={grvt_side}, np={np}, gp={gp}")
+                return
 
             # H3 fix: 양쪽 포지션이 반대 방향인지 검증 (기존: 무조건 복원)
             if nado_side == grvt_side:
