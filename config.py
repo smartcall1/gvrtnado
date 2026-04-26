@@ -84,8 +84,12 @@ class Config:
         self.THIN_MARKET_DEPTH = 500_000  # 이 이하면 얇은 시장 → 청크 대기 2배
         self.MIN_NOTIONAL = 100  # 최소 진입 금액 (USD)
 
-        self.NADO_FUNDING_PERIOD_H = 1  # NADO: 1시간마다 펀딩
-        self.GRVT_FUNDING_PERIOD_H = 8  # GRVT: 8시간마다 펀딩
+        # NADO API의 funding_rate_x18은 daily(24h) decimal rate를 반환 (검증됨)
+        # 정산 cycle은 1h이지만 rate 값 자체는 24h 정규화 형태
+        self.NADO_FUNDING_PERIOD_H = 24
+        # GRVT는 마켓별 cycle 다름 (BTC=8h, MON=4h 등) — get_funding_rate 내부에서
+        # funding_rate_history 타임스탬프로 동적 감지하여 8h decimal로 정규화 반환
+        self.GRVT_FUNDING_PERIOD_H = 8  # 정규화 후 형태 (실제 감지된 값 무시)
 
         # ===== 수수료 설정 (bps, basis points) =====
         self.NADO_MAKER_FEE_BPS = 1.0  # NADO 메이커 수수료 1 bps

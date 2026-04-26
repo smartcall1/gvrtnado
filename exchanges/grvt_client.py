@@ -153,19 +153,29 @@ class GrvtClient(BaseExchangeClient):
         return None
 
     async def get_funding_rate(self, symbol: str) -> Optional[float]:
+        """
+        Returns 8h-normalized decimal funding rate.
+        GRVT API: funding_rate는 percentage per cycle, funding_interval_hours는 cycle 시간.
+        예: MON funding_rate=-0.0381 (= -0.0381% per 4h), funding_interval_hours=4
+        → decimal per 8h = (-0.0381 / 100) × (8 / 4) = -0.000762
+        """
         try:
             grvt_sym = self._grvt_symbol(symbol)
             since_ns = int((time.time() - 86400) * 1e9)
             result = await self._retry(self._api.fetch_funding_rate_history, grvt_sym, since_ns, 1)
-            if isinstance(result, dict):
-                entries = result.get("result", [])
-            else:
-                entries = result if isinstance(result, list) else []
-            if entries and len(entries) > 0:
-                entry = entries[-1] if isinstance(entries, list) else entries
-                rate = entry.get("funding_rate", entry.get("fundingRate"))
-                if rate is not None:
-                    return float(rate)
+            entries = result.get("result", []) if isinstance(result, dict) else (result if isinstance(result, list) else [])
+            if not entries:
+                return None
+            latest = entries[-1] if isinstance(entries, list) else entries
+            raw_rate = latest.get("funding_rate", latest.get("fundingRate"))
+            if raw_rate is None:
+                return None
+            # GRVT가 직접 제공하는 cycle period 사용 (BTC=8, MON=4 등)
+            cycle_hours = float(latest.get("funding_interval_hours", 8))
+            # percentage per cycle → decimal per 8h
+            rate_decimal_per_cycle = float(raw_rate) / 100.0
+            rate_8h = rate_decimal_per_cycle * (8.0 / cycle_hours)
+            return rate_8h
         except Exception as e:
             logger.error(f"GRVT get_funding_rate: {e}")
         return None
