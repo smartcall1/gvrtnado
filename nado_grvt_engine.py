@@ -67,7 +67,7 @@ class DeltaNeutralBot:
         self._nado_price: Optional[float] = None
         self._grvt_price: Optional[float] = None
         self._last_balance_check = 0.0
-        self._last_funding_check = 0.0
+        self._last_funding_check = time.time()  # init to now — 0.0 caused 56년치 오accumulation on restart
         self._last_daily_report = ""
         self._last_margin_warn = 0.0
         self._cycle_history: list[Cycle] = []
@@ -378,22 +378,36 @@ class DeltaNeutralBot:
 
         now = time.time()
         if now - self._last_funding_check > self.cfg.POLL_FUNDING_SECONDS:
-            elapsed_hours = (now - self._last_funding_check) / 3600
+            delta_seconds = now - self._last_funding_check
             self._last_funding_check = now
-            nado_rate = await self._nado.get_funding_rate(pair)
-            grvt_rate = await self._grvt.get_funding_rate(pair)
-            if nado_rate is not None and grvt_rate is not None:
-                nado_8h = normalize_funding_to_8h(nado_rate, self.cfg.NADO_FUNDING_PERIOD_H)
-                grvt_8h = normalize_funding_to_8h(grvt_rate, self.cfg.GRVT_FUNDING_PERIOD_H)
-                pos = self._positions.get("nado") or self._positions.get("grvt")
-                notional = pos.notional if pos else 0
-                if self._state.direction == "A":
-                    rate_diff = grvt_8h - nado_8h
-                else:
-                    rate_diff = nado_8h - grvt_8h
-                # H2: 연속 근사 — 실제 펀딩은 이산 지급(NADO 1h, GRVT 8h)이라 누적 시 소폭 괴리 가능
-                funding_income = notional * rate_diff * (elapsed_hours / 8)
-                self._state.cumulative_funding += funding_income
+            # Sanity clamp: 1시간 이상 갭은 재시작/시계오류로 간주, 누적 스킵
+            if delta_seconds > 3600:
+                logger.warning(f"Funding check delta {delta_seconds:.0f}s 비정상, 누적 스킵")
+            else:
+                elapsed_hours = delta_seconds / 3600
+                nado_rate = await self._nado.get_funding_rate(pair)
+                grvt_rate = await self._grvt.get_funding_rate(pair)
+                if nado_rate is not None and grvt_rate is not None:
+                    nado_8h = normalize_funding_to_8h(nado_rate, self.cfg.NADO_FUNDING_PERIOD_H)
+                    grvt_8h = normalize_funding_to_8h(grvt_rate, self.cfg.GRVT_FUNDING_PERIOD_H)
+                    pos = self._positions.get("nado") or self._positions.get("grvt")
+                    notional = pos.notional if pos else 0
+                    if self._state.direction == "A":
+                        rate_diff = grvt_8h - nado_8h
+                    else:
+                        rate_diff = nado_8h - grvt_8h
+                    # H2: 연속 근사 — 실제 펀딩은 이산 지급(NADO 1h, GRVT 8h)이라 누적 시 소폭 괴리 가능
+                    funding_income = notional * rate_diff * (elapsed_hours / 8)
+                    # Sanity: 1폴링당 누적이 notional의 1% 초과면 비정상
+                    if abs(funding_income) > notional * 0.01:
+                        logger.error(f"Funding income ${funding_income:.2f} > notional 1% ({notional*0.01:.2f}), 누적 스킵")
+                    else:
+                        self._state.cumulative_funding += funding_income
+                    # Sanity: cumulative이 notional의 10배 초과면 corrupt → 리셋
+                    if abs(self._state.cumulative_funding) > notional * 10:
+                        logger.critical(f"cumulative_funding ${self._state.cumulative_funding:,.0f} corrupt, 0으로 리셋")
+                        await self._telegram.send_alert(f"[🚨 RESET] 손상된 누적 펀딩 (${self._state.cumulative_funding:,.0f}) 0으로 초기화")
+                        self._state.cumulative_funding = 0.0
                 self._log_jsonl("funding_history.jsonl", {
                     "pair": pair, "nado_rate": nado_rate, "grvt_rate": grvt_rate,
                     "funding_income": funding_income, "cumulative": self._state.cumulative_funding,
@@ -790,6 +804,7 @@ class DeltaNeutralBot:
             self._positions["grvt"] = Position(
                 "grvt", pair, grvt_side, grvt_notional or notional, grvt_entry, self.cfg.LEVERAGE, margin,
             )
+            self._last_funding_check = time.time()  # 복구 시 펀딩 카운터 재설정
             if not self._state.direction:
                 self._state.direction = "A" if nado_side == "LONG" else "B"
             self._state.cycle_state = CycleState.HOLD
