@@ -804,6 +804,15 @@ class DeltaNeutralBot:
     # --- Telegram 핸들러 ---
 
     async def _register_telegram_handlers(self):
+        def _fmt_price(p: float) -> str:
+            if p is None or p <= 0:
+                return "N/A"
+            if p >= 1000:
+                return f"${p:,.2f}"
+            if p >= 1:
+                return f"${p:,.4f}"
+            return f"${p:.6f}"
+
         async def on_status():
             mode = self._state.mode.value
             pair = self._state.pair
@@ -820,16 +829,27 @@ class DeltaNeutralBot:
             fees = self._state.cumulative_fees
             net_pnl = spread_mtm + funding - fees
 
+            nado_bal = self._state.nado_balance
+            grvt_bal = self._state.grvt_balance
+            total_bal = nado_bal + grvt_bal
+
             boost = self._pair_mgr.get_boost(pair)
             boost_str = ""
             if boost.get("nado", 1.0) != 1.0 or boost.get("grvt", 1.0) != 1.0:
                 boost_str = f" | 부스트 N:{boost['nado']}× G:{boost['grvt']}×"
 
+            now_kst = datetime.now(timezone(timedelta(hours=9)))
+
             lines = [
                 "📊 <b>Status</b>",
                 "━━━━━━━━━━━━━━━",
-                f"페어: {pair} | 레버리지: {leverage}x | 모드: {mode}{boost_str}",
-                f"상태: {cycle}",
+                f"🤖 상태: <b>{cycle}</b> | 모드: {mode}",
+                f"   페어: {pair} | 레버리지: {leverage}x{boost_str}",
+                f"   현재 시각: {now_kst.strftime('%m/%d %H:%M')} KST",
+                "",
+                f"💼 <b>잔고</b>",
+                f"   NADO: ${nado_bal:,.2f} | GRVT: ${grvt_bal:,.2f}",
+                f"   합계: ${total_bal:,.2f}",
             ]
 
             if nado_pos and grvt_pos:
@@ -841,31 +861,112 @@ class DeltaNeutralBot:
 
                 avg_notional = (nado_pos.notional + grvt_pos.notional) / 2
                 imbalance = abs(nado_pos.notional - grvt_pos.notional) / avg_notional * 100 if avg_notional > 0 else 0
+                delta_emoji = "✅" if imbalance <= 5 else "⚠️"
 
-                lines.append(f"보유: {hold_str} | 델타: {imbalance:.2f}% (≤5% 정상)")
+                nado_curr = self._nado_price or 0
+                grvt_curr = self._grvt_price or 0
+                nado_chg = ((nado_curr - nado_pos.entry_price) / nado_pos.entry_price * 100) if nado_pos.entry_price > 0 else 0
+                grvt_chg = ((grvt_curr - grvt_pos.entry_price) / grvt_pos.entry_price * 100) if grvt_pos.entry_price > 0 else 0
+
+                margin_total = nado_pos.margin + grvt_pos.margin
+                pnl_pct = (net_pnl / margin_total * 100) if margin_total > 0 else 0
+
                 lines.append("")
-                lines.append("📍 <b>포지션</b>")
-                lines.append(f"  NADO {nado_pos.side} ${nado_pos.notional:,.0f} @ ${nado_pos.entry_price:.6f}")
-                lines.append(f"  GRVT {grvt_pos.side} ${grvt_pos.notional:,.0f} @ ${grvt_pos.entry_price:.6f}")
+                lines.append(f"📍 <b>포지션</b> (보유: {hold_str})")
+                lines.append(f"   NADO {nado_pos.side} ${nado_pos.notional:,.0f}")
+                lines.append(f"      진입 {_fmt_price(nado_pos.entry_price)} → 현재 {_fmt_price(nado_curr)} ({nado_chg:+.3f}%)")
+                lines.append(f"   GRVT {grvt_pos.side} ${grvt_pos.notional:,.0f}")
+                lines.append(f"      진입 {_fmt_price(grvt_pos.entry_price)} → 현재 {_fmt_price(grvt_curr)} ({grvt_chg:+.3f}%)")
+                lines.append(f"   {delta_emoji} 헷지 균형: {imbalance:.2f}% (≤5% 정상)")
+
+                try:
+                    nr = await self._nado.get_funding_rate(pair)
+                    gr = await self._grvt.get_funding_rate(pair)
+                    if nr is not None and gr is not None:
+                        nado_8h = normalize_funding_to_8h(nr, self.cfg.NADO_FUNDING_PERIOD_H)
+                        grvt_8h = normalize_funding_to_8h(gr, self.cfg.GRVT_FUNDING_PERIOD_H)
+                        if self._state.direction == "A":
+                            rate_diff = grvt_8h - nado_8h
+                        else:
+                            rate_diff = nado_8h - grvt_8h
+                        apr = rate_diff * (365 * 24 / 8) * 100
+                        apr_emoji = "🚀" if apr >= 30 else "✅" if apr >= 10 else "⚠️" if apr >= 0 else "🔻"
+
+                        now_utc = datetime.now(timezone.utc)
+                        next_nado_dt = now_utc.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+                        nado_min_to_next = max(0, int((next_nado_dt - now_utc).total_seconds() / 60))
+                        nh = now_utc.hour
+                        next_grvt_h = ((nh // 8) + 1) * 8
+                        if next_grvt_h >= 24:
+                            next_grvt_dt = now_utc.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                        else:
+                            next_grvt_dt = now_utc.replace(hour=next_grvt_h, minute=0, second=0, microsecond=0)
+                        grvt_total_min = max(0, int((next_grvt_dt - now_utc).total_seconds() / 60))
+                        gh, gm = grvt_total_min // 60, grvt_total_min % 60
+
+                        lines.append("")
+                        lines.append("📈 <b>펀딩 (8h 정규화)</b>")
+                        lines.append(f"   NADO: {nado_8h:+.5f} | GRVT: {grvt_8h:+.5f}")
+                        lines.append(f"   {apr_emoji} 스프레드: {rate_diff:+.5f} (연 APR {apr:+.1f}%)")
+                        lines.append(f"   다음 정산: NADO {nado_min_to_next}분 후 | GRVT {gh}h {gm}m 후")
+                except Exception as e:
+                    logger.debug(f"Status funding fetch: {e}")
+
                 lines.append("")
-                lines.append("💰 <b>손익</b>")
-                lines.append(f"  스프레드 MTM: ${spread_mtm:+,.2f}  (진입 슬리피지·시세변동)")
-                lines.append(f"  누적 펀딩: ${funding:+,.2f}")
-                lines.append(f"  누적 수수료: -${fees:,.2f}")
-                lines.append(f"  ────────")
-                lines.append(f"  <b>순 PnL: ${net_pnl:+,.2f}</b>")
+                lines.append("💰 <b>손익 분해</b>")
+                lines.append(f"   스프레드 MTM: ${spread_mtm:+,.2f}  ← 진입 슬리피지·시세변동")
+                lines.append(f"   누적 펀딩: ${funding:+,.2f}  ← 시간 지나면 +로 회복")
+                lines.append(f"   누적 수수료: -${fees:,.2f}")
+                lines.append(f"   ────────")
+                pnl_emoji = "🟢" if net_pnl >= 0 else "🔴"
+                lines.append(f"   {pnl_emoji} <b>순 PnL: ${net_pnl:+,.2f} ({pnl_pct:+.2f}%/마진)</b>")
 
                 try:
                     mp = self.cfg.mode_params(mode)
+                    min_hold_sec = mp['min_hold_hours'] * 3600
+                    min_remaining = max(0, min_hold_sec - hold_seconds)
+                    if min_remaining > 0:
+                        if min_remaining >= 3600:
+                            min_hold_str = f"{min_remaining/3600:.1f}h 남음"
+                        else:
+                            min_hold_str = f"{int(min_remaining/60)}분 남음"
+                    else:
+                        min_hold_str = "✓ 충족"
+
+                    max_hold_sec = self.cfg.MAX_HOLD_DAYS * 86400
+                    max_remaining_h = max(0, max_hold_sec - hold_seconds) / 3600
+
+                    profit_progress = ""
+                    if mp['spread_exit'] > 0:
+                        progress_pct = (spread_mtm / mp['spread_exit'] * 100) if spread_mtm > 0 else 0
+                        if progress_pct > 0:
+                            profit_progress = f" ({progress_pct:.0f}% 도달)"
+
                     lines.append("")
                     lines.append("⏱ <b>청산 조건</b> (먼저 도달 시 자동)")
-                    lines.append(f"  익절: 스프레드 ≥ +${mp['spread_exit']:.0f}")
-                    lines.append(f"  손절: 스프레드 ≤ ${self.cfg.SPREAD_STOPLOSS:.0f}")
-                    lines.append(f"  최소 보유: {mp['min_hold_hours']:.1f}시간")
+                    lines.append(f"   익절: 스프레드 MTM ≥ +${mp['spread_exit']:.0f}{profit_progress}")
+                    lines.append(f"   손절: 스프레드 MTM ≤ ${self.cfg.SPREAD_STOPLOSS:.0f}")
+                    lines.append(f"   최소 보유: {mp['min_hold_hours']:.1f}h ({min_hold_str})")
+                    lines.append(f"   최대 보유: {self.cfg.MAX_HOLD_DAYS}일 (남은: {max_remaining_h:.1f}h)")
+                except Exception:
+                    pass
+
+                try:
+                    now = datetime.now(timezone.utc)
+                    days = self._earn.days_remaining(now)
+                    prog = self._earn.volume_progress() * 100
+                    trades_ok = "✅" if self._earn.is_trades_target_met() else "❌"
+                    vol_ok = "✅" if self._earn.is_volume_target_met() else "⏳"
+                    lines.append("")
+                    lines.append("💎 <b>GRVT Earn 사이클</b>")
+                    lines.append(f"   {trades_ok} 거래: {self._earn.grvt_trades}/5건")
+                    lines.append(f"   {vol_ok} 볼륨: ${self._earn.grvt_volume:,.0f} / ${self._earn.target_volume:,.0f} ({prog:.1f}%)")
+                    lines.append(f"   사이클 종료까지: {days}일")
                 except Exception:
                     pass
             else:
-                lines.append("(포지션 없음)")
+                lines.append("")
+                lines.append("(포지션 없음 — 다음 IDLE 사이클에서 페어 탐색)")
 
             await self._telegram.send_message("\n".join(lines))
 
