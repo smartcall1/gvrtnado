@@ -82,8 +82,8 @@ class TelegramUI:
         try:
             async with self._session.get(
                 f"{self._base}/getUpdates",
-                params={"offset": self._offset, "timeout": 1},
-                timeout=aiohttp.ClientTimeout(total=5),
+                params={"offset": self._offset, "timeout": 2},
+                timeout=aiohttp.ClientTimeout(total=8),
             ) as resp:
                 if resp.status != 200:
                     return

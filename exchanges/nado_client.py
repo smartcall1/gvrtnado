@@ -132,14 +132,23 @@ class NadoClient(BaseExchangeClient):
             for pb in info.perp_balances:
                 if pb.product_id != product_id:
                     continue
-                # PerpProductBalance.balance.amount is x18 string
                 amount = int(pb.balance.amount) / 1e18
                 if abs(amount) > 0:
+                    # C4 fix: vQuoteBalance에서 entry_price 추출 (기존: 항상 0)
+                    entry_price = 0.0
+                    try:
+                        vqb = getattr(pb.balance, 'v_quote_balance', None)
+                        if vqb is None:
+                            vqb = getattr(pb.balance, 'vQuoteBalance', None)
+                        if vqb is not None and abs(amount) > 0:
+                            entry_price = abs(int(vqb) / 1e18 / amount)
+                    except Exception:
+                        pass
                     positions.append({
                         "side": "LONG" if amount > 0 else "SHORT",
                         "size": abs(amount),
-                        "entry_price": 0,
-                        "notional": 0,
+                        "entry_price": entry_price,
+                        "notional": abs(amount) * entry_price if entry_price > 0 else 0,
                     })
             return positions
         except Exception as e:
@@ -256,11 +265,19 @@ class NadoClient(BaseExchangeClient):
                 digest = ""
                 if result.data and hasattr(result.data, 'digest'):
                     digest = str(result.data.digest)
+                # C1 fix: mark price 기반 실제 체결가 추정 (주문가는 슬리피지 포함이라 부정확)
+                actual_price = price
+                try:
+                    mark = await self.get_mark_price(symbol)
+                    if mark and mark > 0:
+                        actual_price = mark
+                except Exception:
+                    pass
                 return OrderResult(
                     order_id=digest,
                     status="filled" if "success" in status_str else status_str,
                     filled_size=size,
-                    filled_price=price,
+                    filled_price=actual_price,
                 )
         except Exception as e:
             err_str = str(e)
@@ -272,6 +289,26 @@ class NadoClient(BaseExchangeClient):
     async def close_position(
         self, symbol: str, side: str, size: float, slippage_pct: float = 0.01,
     ) -> bool:
+        # C2 fix: 반대 주문으로 부분 청산 지원 (기존은 size 무시하고 전량 청산)
+        try:
+            mark = await self.get_mark_price(symbol)
+            if not mark:
+                return await self._close_all(symbol)
+            close_side = "SELL" if side.upper() == "LONG" else "BUY"
+            if close_side == "BUY":
+                close_price = mark * (1 + slippage_pct)
+            else:
+                close_price = mark * (1 - slippage_pct)
+            res = await self.place_limit_order(symbol, close_side, size, close_price)
+            if res.status in ("filled", "matched"):
+                return True
+            logger.warning(f"NADO partial close failed (status={res.status}), trying full close")
+            return await self._close_all(symbol)
+        except Exception as e:
+            logger.error(f"NADO close_position: {e}")
+            return await self._close_all(symbol)
+
+    async def _close_all(self, symbol: str) -> bool:
         try:
             product_id = self._product_id(symbol)
             result = await asyncio.to_thread(
@@ -282,7 +319,7 @@ class NadoClient(BaseExchangeClient):
             if result:
                 return "success" in str(result.status).lower()
         except Exception as e:
-            logger.error(f"NADO close_position: {e}")
+            logger.error(f"NADO _close_all: {e}")
         return False
 
     async def cancel_all_orders(self, symbol: str) -> bool:

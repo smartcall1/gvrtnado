@@ -61,6 +61,18 @@ class GrvtClient(BaseExchangeClient):
     async def close(self):
         if self._api:
             try:
+                # L1 fix: WS 채널 + HTTP 세션 모두 정리 (기존: _session만 시도)
+                for ws_type in ['mdg', 'tdg', 'mdg_rpc_full', 'tdg_rpc_full']:
+                    ws = getattr(self._api, 'ws', {})
+                    if isinstance(ws, dict):
+                        conn = ws.get(ws_type)
+                    else:
+                        conn = None
+                    if conn:
+                        try:
+                            await conn.close()
+                        except Exception:
+                            pass
                 session = getattr(self._api, '_session', None)
                 if session and not session.closed:
                     await session.close()
@@ -95,20 +107,30 @@ class GrvtClient(BaseExchangeClient):
             return 0.0
 
     async def get_positions(self, symbol: str) -> list[dict]:
+        # GRVT raw response uses 'size' (signed), 'entry_price', 'notional' — NOT
+        # CCXT-translated 'contracts'/'entryPrice'. Parse raw fields with CCXT fallback.
         try:
             grvt_sym = self._grvt_symbol(symbol)
             result = await self._retry(self._api.fetch_positions, [grvt_sym])
-            if result:
-                return [
-                    {
-                        "side": p.get("side", "").upper(),
-                        "size": abs(float(p.get("contracts", p.get("contractSize", 0)))),
-                        "entry_price": float(p.get("entryPrice", 0)),
-                        "notional": abs(float(p.get("notional", 0))),
-                    }
-                    for p in result
-                    if abs(float(p.get("contracts", p.get("contractSize", 0)))) > 0
-                ]
+            if not result:
+                return []
+            positions = []
+            for p in result:
+                size_raw = p.get("size", p.get("contracts", p.get("contractSize", 0)))
+                size_signed = float(size_raw) if size_raw not in (None, "") else 0.0
+                if abs(size_signed) <= 0:
+                    continue
+                side = (p.get("side") or "").upper()
+                if not side:
+                    side = "LONG" if size_signed > 0 else "SHORT"
+                entry = p.get("entry_price", p.get("entryPrice", 0))
+                positions.append({
+                    "side": side,
+                    "size": abs(size_signed),
+                    "entry_price": float(entry) if entry not in (None, "") else 0.0,
+                    "notional": abs(float(p.get("notional", 0) or 0)),
+                })
+            return positions
         except Exception as e:
             logger.error(f"GRVT get_positions: {e}")
         return []
@@ -156,6 +178,27 @@ class GrvtClient(BaseExchangeClient):
         size = round(math.floor(size / min_sz) * min_sz, 10)
         return price, size
 
+    @staticmethod
+    def _parse_order_response(result: dict) -> tuple[str, str, float]:
+        if not isinstance(result, dict):
+            return "", "", 0.0
+        state = result.get("state") or {}
+        status = state.get("status") or ""
+        coid = str((result.get("metadata") or {}).get("client_order_id", "") or "")
+        traded = state.get("traded_size") or []
+        if isinstance(traded, str):
+            traded = [traded]
+        filled = 0.0
+        if isinstance(traded, list):
+            try:
+                filled = sum(abs(float(s)) for s in traded if s not in (None, ""))
+            except (TypeError, ValueError):
+                filled = 0.0
+        return coid, status, filled
+
+    def _is_filled(self, status: str, filled: float) -> bool:
+        return status in ("FILLED", "closed", "filled") or filled > 0
+
     async def place_limit_order(
         self, symbol: str, side: str, size: float, price: float,
     ) -> OrderResult:
@@ -170,39 +213,48 @@ class GrvtClient(BaseExchangeClient):
                 {},
             )
             if result:
-                status = result.get("status", "")
-                order_id = str(result.get("id", ""))
-                filled = float(result.get("filled", 0))
+                coid, status, filled = self._parse_order_response(result)
 
-                if status not in ("closed", "filled") and filled <= 0 and order_id:
-                    logger.info(f"GRVT {symbol} order {order_id} status={status}, waiting for fill...")
-                    for _poll in range(3):
-                        await asyncio.sleep(2)
+                if not self._is_filled(status, filled):
+                    if coid:
+                        logger.info(f"GRVT {symbol} order coid={coid} status={status}, waiting for fill...")
+                        for _poll in range(3):
+                            await asyncio.sleep(2)
+                            try:
+                                order_info = await self._retry(
+                                    self._api.fetch_order, params={"client_order_id": coid},
+                                )
+                                if order_info:
+                                    inner = order_info.get("result", order_info)
+                                    _, status, filled = self._parse_order_response(inner)
+                                    logger.info(f"GRVT {symbol} order poll {_poll+1}: status={status}, filled={filled}")
+                                    if self._is_filled(status, filled):
+                                        break
+                            except Exception as poll_err:
+                                logger.warning(f"GRVT {symbol} order poll failed: {poll_err}")
+
+                        if not self._is_filled(status, filled):
+                            logger.warning(f"GRVT {symbol} order coid={coid} still unfilled, cancelling")
+                            try:
+                                await self._api.cancel_order(params={"client_order_id": coid})
+                            except Exception:
+                                pass
+                    else:
+                        # No coid means we can't track or cancel by id - cancel all on this symbol as safety
+                        logger.warning(f"GRVT {symbol} response missing client_order_id, falling back to cancel_all_orders")
                         try:
-                            order_info = await self._retry(self._api.fetch_order, order_id, grvt_sym)
-                            if order_info:
-                                status = order_info.get("status", status)
-                                filled = float(order_info.get("filled", filled))
-                                logger.info(f"GRVT {symbol} order poll {_poll+1}: status={status}, filled={filled}")
-                                if status in ("closed", "filled") or filled > 0:
-                                    break
-                        except Exception as poll_err:
-                            logger.warning(f"GRVT {symbol} order poll failed: {poll_err}")
+                            await self._api.cancel_all_orders({"kind": "PERPETUAL", "base": symbol.upper()})
+                        except Exception as ce:
+                            logger.error(f"GRVT {symbol} cancel_all_orders fallback failed: {ce}")
 
-                    if status not in ("closed", "filled") and filled <= 0:
-                        logger.warning(f"GRVT {symbol} order {order_id} still unfilled, cancelling")
-                        try:
-                            await self._api.cancel_order(order_id, grvt_sym)
-                        except Exception:
-                            pass
-
-                if status not in ("closed", "filled") and filled <= 0:
+                if not self._is_filled(status, filled):
                     logger.warning(f"GRVT {symbol} order final status={status}, result={result}")
+                is_done = self._is_filled(status, filled)
                 return OrderResult(
-                    order_id=order_id,
-                    status="filled" if status in ("closed", "filled") or filled > 0 else status,
-                    filled_size=filled if filled > 0 else size,
-                    filled_price=float(result.get("average", price)),
+                    order_id=coid,
+                    status="filled" if is_done else status,
+                    filled_size=(filled if filled > 0 else size) if is_done else 0.0,
+                    filled_price=price,
                     message=f"grvt_status={status}",
                 )
             else:
@@ -217,20 +269,53 @@ class GrvtClient(BaseExchangeClient):
         price = await self.get_mark_price(symbol)
         if not price:
             return False
-        if side == "LONG":
+        if side.upper() == "LONG":
             close_side, close_price = "sell", price * (1 - slippage_pct)
         else:
             close_side, close_price = "buy", price * (1 + slippage_pct)
         try:
             grvt_sym = self._grvt_symbol(symbol)
             close_price, size = self._align_tick(grvt_sym, close_price, size)
+            if size <= 0:
+                return False
             result = await self._retry(
                 self._api.create_order,
                 grvt_sym, "limit", close_side, size, close_price,
             )
             if result:
-                status = result.get("status", "")
-                return status in ("closed", "filled")
+                coid, status, filled = self._parse_order_response(result)
+
+                if not self._is_filled(status, filled):
+                    if coid:
+                        logger.info(f"GRVT close {symbol} coid={coid} status={status}, polling...")
+                        for _poll in range(3):
+                            await asyncio.sleep(2)
+                            try:
+                                order_info = await self._retry(
+                                    self._api.fetch_order, params={"client_order_id": coid},
+                                )
+                                if order_info:
+                                    inner = order_info.get("result", order_info)
+                                    _, status, filled = self._parse_order_response(inner)
+                                    if self._is_filled(status, filled):
+                                        break
+                            except Exception as poll_err:
+                                logger.warning(f"GRVT close poll failed: {poll_err}")
+
+                        if not self._is_filled(status, filled):
+                            logger.warning(f"GRVT close {symbol} coid={coid} unfilled, cancelling")
+                            try:
+                                await self._api.cancel_order(params={"client_order_id": coid})
+                            except Exception:
+                                pass
+                    else:
+                        logger.warning(f"GRVT close {symbol} response missing client_order_id, cancel_all fallback")
+                        try:
+                            await self._api.cancel_all_orders({"kind": "PERPETUAL", "base": symbol.upper()})
+                        except Exception as ce:
+                            logger.error(f"GRVT close {symbol} cancel_all_orders fallback failed: {ce}")
+
+                return self._is_filled(status, filled)
         except Exception as e:
             logger.error(f"GRVT close_position: {e}")
         return False

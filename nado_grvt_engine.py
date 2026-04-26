@@ -19,11 +19,11 @@ logging.getLogger("aiohttp").setLevel(logging.WARNING)
 from config import Config
 from models import (
     CycleState, OperatingMode, Position, Cycle,
-    EarnState, BotState, FundingSnapshot,
+    EarnState, BotState,
 )
 from strategy import (
     normalize_funding_to_8h, decide_direction, should_exit_cycle,
-    should_exit_spread, is_opposite_direction_better, calc_notional,
+    should_exit_spread, calc_notional,
     determine_mode, is_entry_favorable,
 )
 from pair_manager import PairManager
@@ -70,7 +70,6 @@ class DeltaNeutralBot:
         self._last_funding_check = 0.0
         self._last_daily_report = ""
         self._last_margin_warn = 0.0
-        self._consecutive_loss_cycles = 0
         self._cycle_history: list[Cycle] = []
         self._idle_since: float = 0.0
         self._enter_since: float = 0.0
@@ -164,10 +163,17 @@ class DeltaNeutralBot:
         else:
             logger.warning("[IDLE] No funding spreads found for any pair")
 
+        # M1 fix: 예상 notional의 3배를 최소 유동성으로 설정 (기존: MIN_NOTIONAL×10=$1K)
+        est_notional = calc_notional(
+            self._state.nado_balance or 1000,
+            self._state.grvt_balance or 1000,
+            self.cfg.LEVERAGE, self.cfg.MARGIN_BUFFER,
+        )
+        min_liq = max(est_notional * 3, 10000)
         best_pair = self._pair_mgr.best_pair(
             funding_spreads=funding_spreads,
             liquidities=liquidities,
-            min_liquidity=self.cfg.MIN_NOTIONAL * 10,
+            min_liquidity=min_liq,
         )
         logger.info(f"[IDLE] selected pair: {best_pair}")
         self._state.pair = best_pair
@@ -333,14 +339,22 @@ class DeltaNeutralBot:
         spread_mtm = nado_pnl + grvt_pnl
 
         mode_params = self.cfg.mode_params(self._state.mode.value)
-        if should_exit_spread(spread_mtm, mode_params["spread_exit"], self.cfg.SPREAD_STOPLOSS):
-            reason = "spread_profit" if spread_mtm > 0 else "spread_stoploss"
+
+        # H1 fix: 손절은 즉시, 익절은 min_hold 이후에만 (기존: 둘 다 즉시)
+        if spread_mtm <= self.cfg.SPREAD_STOPLOSS:
             self._state.cycle_state = CycleState.EXIT
-            self._state.exit_reason = reason
+            self._state.exit_reason = "spread_stoploss"
             self._save_state()
             return
 
         hold_hours = (time.time() - self._state.entered_at) / 3600
+
+        if hold_hours >= mode_params["min_hold_hours"] and spread_mtm >= mode_params["spread_exit"]:
+            self._state.cycle_state = CycleState.EXIT
+            self._state.exit_reason = "spread_profit"
+            self._save_state()
+            return
+
         worst_margin = 100.0
         for pos in self._positions.values():
             price = self._nado_price if pos.exchange == "nado" else self._grvt_price
@@ -377,6 +391,7 @@ class DeltaNeutralBot:
                     rate_diff = grvt_8h - nado_8h
                 else:
                     rate_diff = nado_8h - grvt_8h
+                # H2: 연속 근사 — 실제 펀딩은 이산 지급(NADO 1h, GRVT 8h)이라 누적 시 소폭 괴리 가능
                 funding_income = notional * rate_diff * (elapsed_hours / 8)
                 self._state.cumulative_funding += funding_income
                 self._log_jsonl("funding_history.jsonl", {
@@ -580,11 +595,34 @@ class DeltaNeutralBot:
                 return "failed"
         elif nado_notional > 0 and grvt_notional == 0:
             logger.warning("Only NADO filled, GRVT empty — rolling back NADO")
-            await self._nado.close_position(pair, nado_pos_side, nado_filled_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT)
+            rollback_ok = await self._nado.close_position(pair, nado_pos_side, nado_filled_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT)
+            if not rollback_ok:
+                # Rollback failed — register the orphan so the next EXIT cycle keeps trying
+                nado_vwap = nado_filled_cost / nado_filled_qty if nado_filled_qty > 0 else 0
+                self._positions["nado"] = Position(
+                    exchange="nado", symbol=pair, side=nado_pos_side,
+                    notional=nado_notional, entry_price=nado_vwap,
+                    leverage=self.cfg.LEVERAGE, margin=nado_notional / self.cfg.LEVERAGE,
+                )
+                logger.critical(f"NADO rollback failed — orphan position registered for retry")
+                await self._telegram.send_alert(
+                    f"[🚨 ROLLBACK FAIL] NADO {pair} 단방향 잔존, 다음 EXIT cycle 재시도"
+                )
             return "failed"
         elif grvt_notional > 0 and nado_notional == 0:
             logger.warning("Only GRVT filled, NADO empty — rolling back GRVT")
-            await self._grvt.close_position(pair, grvt_pos_side, grvt_filled_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT)
+            rollback_ok = await self._grvt.close_position(pair, grvt_pos_side, grvt_filled_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT)
+            if not rollback_ok:
+                grvt_vwap = grvt_filled_cost / grvt_filled_qty if grvt_filled_qty > 0 else 0
+                self._positions["grvt"] = Position(
+                    exchange="grvt", symbol=pair, side=grvt_pos_side,
+                    notional=grvt_notional, entry_price=grvt_vwap,
+                    leverage=self.cfg.LEVERAGE, margin=grvt_notional / self.cfg.LEVERAGE,
+                )
+                logger.critical(f"GRVT rollback failed — orphan position registered for retry")
+                await self._telegram.send_alert(
+                    f"[🚨 ROLLBACK FAIL] GRVT {pair} 단방향 잔존, 다음 EXIT cycle 재시도"
+                )
             return "nado_max_oi" if nado_oi_fail else "nado_health" if nado_health_fail else "failed"
 
         if nado_notional > 0 and grvt_notional > 0:
@@ -622,14 +660,23 @@ class DeltaNeutralBot:
 
         for i in range(chunks):
             tasks = []
+            labels = []
             if nado_pos and nado_total_size > 0:
                 chunk_qty = nado_total_size / chunks
                 tasks.append(self._nado.close_position(pair, nado_pos.side, chunk_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT))
+                labels.append("nado")
             if grvt_pos and grvt_total_size > 0:
                 chunk_qty = grvt_total_size / chunks
                 tasks.append(self._grvt.close_position(pair, grvt_pos.side, chunk_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT))
+                labels.append("grvt")
             if tasks:
-                await asyncio.gather(*tasks)
+                # gather results — bool is what each close_position returns; failures need attention
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for label, r in zip(labels, results):
+                    if isinstance(r, Exception):
+                        logger.error(f"Exit chunk {i+1} {label} close raised: {r}")
+                    elif r is False:
+                        logger.warning(f"Exit chunk {i+1} {label} close returned False")
             if i < chunks - 1:
                 await asyncio.sleep(self.cfg.CHUNK_WAIT)
 
@@ -715,14 +762,29 @@ class DeltaNeutralBot:
             grvt_size = float(gp.get("size", gp.get("contracts", 0)))
             nado_side = "LONG" if nado_size > 0 else "SHORT"
             grvt_side = "LONG" if gp.get("side", "").upper() == "LONG" else "SHORT"
-            notional = abs(nado_size) * nado_entry
-            margin = notional / self.cfg.LEVERAGE
+
+            # H3 fix: 양쪽 포지션이 반대 방향인지 검증 (기존: 무조건 복원)
+            if nado_side == grvt_side:
+                logger.critical(f"Recovery: NADO={nado_side} GRVT={grvt_side} — 같은 방향! 수동 확인 필요")
+                await self._telegram.send_alert(f"[🚨 RECOVERY] 양쪽 동일 방향({nado_side}) — 수동 확인 필요")
+                return
+
+            # entry_price가 0이면 mark price로 대체 (C4 fix 전 데이터 호환)
+            if nado_entry <= 0:
+                nado_entry = await self._nado.get_mark_price(pair) or 0
+            if grvt_entry <= 0:
+                grvt_entry = await self._grvt.get_mark_price(pair) or 0
+
+            nado_notional = abs(nado_size) * nado_entry if nado_entry > 0 else 0
+            grvt_notional = abs(grvt_size) * grvt_entry if grvt_entry > 0 else 0
+            notional = max(nado_notional, grvt_notional)
+            margin = notional / self.cfg.LEVERAGE if notional > 0 else 0
 
             self._positions["nado"] = Position(
-                "nado", pair, nado_side, notional, nado_entry, self.cfg.LEVERAGE, margin,
+                "nado", pair, nado_side, nado_notional or notional, nado_entry, self.cfg.LEVERAGE, margin,
             )
             self._positions["grvt"] = Position(
-                "grvt", pair, grvt_side, notional, grvt_entry, self.cfg.LEVERAGE, margin,
+                "grvt", pair, grvt_side, grvt_notional or notional, grvt_entry, self.cfg.LEVERAGE, margin,
             )
             if not self._state.direction:
                 self._state.direction = "A" if nado_side == "LONG" else "B"
@@ -840,7 +902,8 @@ class DeltaNeutralBot:
         if today == self._last_daily_report:
             return
         now_kst = datetime.now(KST)
-        if now_kst.hour != 9:
+        # M2 fix: 9시 이후 첫 폴링에서 발송 (기존: 정각 hour==9만 매칭)
+        if now_kst.hour < 9:
             return
         self._last_daily_report = today
         total_pnl = sum(c.net_pnl for c in self._cycle_history)

@@ -192,10 +192,3 @@ class BotState:
             exit_reason=d.get("exit_reason", ""),
             boost_config=d.get("boost_config", {}),
         )
-
-
-@dataclass
-class FundingSnapshot:
-    nado_rate: float
-    grvt_rate: float
-    timestamp: float = field(default_factory=time.time)
