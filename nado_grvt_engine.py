@@ -807,18 +807,66 @@ class DeltaNeutralBot:
         async def on_status():
             mode = self._state.mode.value
             pair = self._state.pair
+            cycle = self._state.cycle_state.value
+            leverage = self.cfg.LEVERAGE
+
+            nado_pos = self._positions.get("nado") if "nado" in self._positions else None
+            grvt_pos = self._positions.get("grvt") if "grvt" in self._positions else None
+            nado_pnl = nado_pos.calc_unrealized_pnl(self._nado_price or 0) if nado_pos else 0.0
+            grvt_pnl = grvt_pos.calc_unrealized_pnl(self._grvt_price or 0) if grvt_pos else 0.0
+            spread_mtm = nado_pnl + grvt_pnl
+
+            funding = self._state.cumulative_funding
+            fees = self._state.cumulative_fees
+            net_pnl = spread_mtm + funding - fees
+
             boost = self._pair_mgr.get_boost(pair)
-            nado_pnl = self._positions.get("nado", Position("", "", "", 0, 0, 0, 0)).calc_unrealized_pnl(self._nado_price or 0) if "nado" in self._positions else 0
-            grvt_pnl = self._positions.get("grvt", Position("", "", "", 0, 0, 0, 0)).calc_unrealized_pnl(self._grvt_price or 0) if "grvt" in self._positions else 0
-            spread = nado_pnl + grvt_pnl
+            boost_str = ""
+            if boost.get("nado", 1.0) != 1.0 or boost.get("grvt", 1.0) != 1.0:
+                boost_str = f" | 부스트 N:{boost['nado']}× G:{boost['grvt']}×"
+
             lines = [
                 "📊 <b>Status</b>",
                 "━━━━━━━━━━━━━━━",
-                f"모드: {mode} | 페어: {pair} (N:{boost['nado']}x G:{boost['grvt']}x)",
-                f"상태: {self._state.cycle_state.value}",
-                f"NADO: ${nado_pnl:+.2f} | GRVT: ${grvt_pnl:+.2f}",
-                f"스프레드 MTM: ${spread:+.2f}",
+                f"페어: {pair} | 레버리지: {leverage}x | 모드: {mode}{boost_str}",
+                f"상태: {cycle}",
             ]
+
+            if nado_pos and grvt_pos:
+                hold_seconds = (time.time() - self._state.entered_at) if self._state.entered_at else 0
+                if hold_seconds >= 3600:
+                    hold_str = f"{hold_seconds/3600:.1f}시간"
+                else:
+                    hold_str = f"{int(hold_seconds/60)}분"
+
+                avg_notional = (nado_pos.notional + grvt_pos.notional) / 2
+                imbalance = abs(nado_pos.notional - grvt_pos.notional) / avg_notional * 100 if avg_notional > 0 else 0
+
+                lines.append(f"보유: {hold_str} | 델타: {imbalance:.2f}% (≤5% 정상)")
+                lines.append("")
+                lines.append("📍 <b>포지션</b>")
+                lines.append(f"  NADO {nado_pos.side} ${nado_pos.notional:,.0f} @ ${nado_pos.entry_price:.6f}")
+                lines.append(f"  GRVT {grvt_pos.side} ${grvt_pos.notional:,.0f} @ ${grvt_pos.entry_price:.6f}")
+                lines.append("")
+                lines.append("💰 <b>손익</b>")
+                lines.append(f"  스프레드 MTM: ${spread_mtm:+,.2f}  (진입 슬리피지·시세변동)")
+                lines.append(f"  누적 펀딩: ${funding:+,.2f}")
+                lines.append(f"  누적 수수료: -${fees:,.2f}")
+                lines.append(f"  ────────")
+                lines.append(f"  <b>순 PnL: ${net_pnl:+,.2f}</b>")
+
+                try:
+                    mp = self.cfg.mode_params(mode)
+                    lines.append("")
+                    lines.append("⏱ <b>청산 조건</b> (먼저 도달 시 자동)")
+                    lines.append(f"  익절: 스프레드 ≥ +${mp['spread_exit']:.0f}")
+                    lines.append(f"  손절: 스프레드 ≤ ${self.cfg.SPREAD_STOPLOSS:.0f}")
+                    lines.append(f"  최소 보유: {mp['min_hold_hours']:.1f}시간")
+                except Exception:
+                    pass
+            else:
+                lines.append("(포지션 없음)")
+
             await self._telegram.send_message("\n".join(lines))
 
         async def on_earn():

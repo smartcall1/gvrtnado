@@ -265,19 +265,12 @@ class NadoClient(BaseExchangeClient):
                 digest = ""
                 if result.data and hasattr(result.data, 'digest'):
                     digest = str(result.data.digest)
-                # C1 fix: mark price 기반 실제 체결가 추정 (주문가는 슬리피지 포함이라 부정확)
-                actual_price = price
-                try:
-                    mark = await self.get_mark_price(symbol)
-                    if mark and mark > 0:
-                        actual_price = mark
-                except Exception:
-                    pass
+                # 슬리피지 포함된 limit 가격을 entry로 사용 — 보수적이고 GRVT side와 회계 일관성 (C-3)
                 return OrderResult(
                     order_id=digest,
                     status="filled" if "success" in status_str else status_str,
                     filled_size=size,
-                    filled_price=actual_price,
+                    filled_price=price,
                 )
         except Exception as e:
             err_str = str(e)
