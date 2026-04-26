@@ -340,8 +340,17 @@ class DeltaNeutralBot:
 
         mode_params = self.cfg.mode_params(self._state.mode.value)
 
-        # H1 fix: 손절은 즉시, 익절은 min_hold 이후에만 (기존: 둘 다 즉시)
-        if spread_mtm <= self.cfg.SPREAD_STOPLOSS:
+        # 실잔고 기반 PnL — entry_total_balance 진입 직전 스냅샷과 비교 (가장 정확)
+        # 실제 슬리피지·수수료·정산된 펀딩 모두 반영된 진짜 손익
+        real_pnl = None
+        if self._state.entry_total_balance > 0:
+            current_total = self._state.nado_balance + self._state.grvt_balance
+            real_pnl = current_total - self._state.entry_total_balance
+        # 실잔고 미초기화(복구 등)면 spread_mtm으로 대체
+        pnl_for_exit = real_pnl if real_pnl is not None else spread_mtm
+
+        # 손절: 즉시 (모든 모드)
+        if pnl_for_exit <= self.cfg.SPREAD_STOPLOSS:
             self._state.cycle_state = CycleState.EXIT
             self._state.exit_reason = "spread_stoploss"
             self._save_state()
@@ -349,11 +358,19 @@ class DeltaNeutralBot:
 
         hold_hours = (time.time() - self._state.entered_at) / 3600
 
-        if hold_hours >= mode_params["min_hold_hours"] and spread_mtm >= mode_params["spread_exit"]:
-            self._state.cycle_state = CycleState.EXIT
-            self._state.exit_reason = "spread_profit"
-            self._save_state()
-            return
+        if hold_hours >= mode_params["min_hold_hours"]:
+            # 1) 큰 수익: spread_exit 임계 도달
+            if pnl_for_exit >= mode_params["spread_exit"]:
+                self._state.cycle_state = CycleState.EXIT
+                self._state.exit_reason = "spread_profit"
+                self._save_state()
+                return
+            # 2) URGENT 모드만: 본전 회복(real_pnl ≥ 0)이면 청산 (회전율 우선)
+            if self._state.mode == OperatingMode.VOLUME_URGENT and real_pnl is not None and real_pnl >= 0:
+                self._state.cycle_state = CycleState.EXIT
+                self._state.exit_reason = "break_even"
+                self._save_state()
+                return
 
         worst_margin = 100.0
         for pos in self._positions.values():
@@ -445,6 +462,18 @@ class DeltaNeutralBot:
         notional = pos.notional if pos else 0
         grvt_volume = (grvt_p.notional * 2) if grvt_p else 0
 
+        # 청산 후 실제 잔고로 진짜 cycle PnL 계산 (가장 정확)
+        try:
+            post_nado = await self._nado.get_balance()
+            post_grvt = await self._grvt.get_balance()
+            self._state.nado_balance = post_nado
+            self._state.grvt_balance = post_grvt
+        except Exception:
+            post_nado = self._state.nado_balance
+            post_grvt = self._state.grvt_balance
+        post_total = post_nado + post_grvt
+        real_cycle_pnl = (post_total - self._state.entry_total_balance) if self._state.entry_total_balance > 0 else 0.0
+
         cycle = Cycle(
             cycle_id=self._state.cycle_id, pair=pair,
             direction=self._state.direction, notional=notional,
@@ -458,7 +487,11 @@ class DeltaNeutralBot:
             fee_cost=self._state.cumulative_fees,
             exit_reason=exit_reason,
             volume_generated=grvt_volume,
+            real_pnl=real_cycle_pnl,
         )
+
+        # cycle 끝 → 다음 cycle 위해 entry baseline 리셋
+        self._state.entry_total_balance = 0.0
         self._log_jsonl("cycles.jsonl", json.loads(cycle.to_jsonl()))
         self._cycle_history.append(cycle)
         self._earn.grvt_volume += grvt_volume
@@ -504,6 +537,15 @@ class DeltaNeutralBot:
                 f"[⚠️ LEVERAGE] GRVT {pair} 레버리지를 {self.cfg.LEVERAGE}x로 웹UI에서 설정해주세요"
             )
             return "failed"
+
+        # 진입 직전 실제 잔고 스냅샷 — URGENT break-even 비교 baseline
+        try:
+            pre_nado = await self._nado.get_balance()
+            pre_grvt = await self._grvt.get_balance()
+            self._state.entry_total_balance = pre_nado + pre_grvt
+        except Exception as e:
+            logger.warning(f"진입 전 잔고 스냅샷 실패: {e}")
+            self._state.entry_total_balance = self._state.nado_balance + self._state.grvt_balance
 
         chunk_size = notional / self.cfg.ENTRY_CHUNKS
         nado_side = "BUY" if direction == "A" else "SELL"
@@ -938,9 +980,19 @@ class DeltaNeutralBot:
                 except Exception as e:
                     logger.debug(f"Status funding fetch: {e}")
 
+                # 실잔고 기반 PnL (가장 정확) vs 봇 내부 추정 (참고용)
+                real_pnl = None
+                if self._state.entry_total_balance > 0:
+                    real_pnl = (nado_bal + grvt_bal) - self._state.entry_total_balance
+
                 lines.append("")
-                lines.append(f"💰 PnL: {pnl_emoji} <b>${net_pnl:+,.2f}</b>")
-                lines.append(f"   스프레드 ${spread_mtm:+,.2f} + 펀딩 ${funding:+,.2f} - 수수료 ${fees:,.2f}")
+                if real_pnl is not None:
+                    real_emoji = "🟢" if real_pnl >= 0 else "🔴"
+                    lines.append(f"💰 실잔고 PnL: {real_emoji} <b>${real_pnl:+,.2f}</b>  (진입 ${self._state.entry_total_balance:,.0f} 대비)")
+                    lines.append(f"   추정 분해: 스프레드 ${spread_mtm:+,.2f} + 펀딩 ${funding:+,.2f} - 수수료 ${fees:,.2f} = ${net_pnl:+,.2f}")
+                else:
+                    lines.append(f"💰 PnL: {pnl_emoji} <b>${net_pnl:+,.2f}</b> <i>(추정치, 실잔고 baseline 미초기화)</i>")
+                    lines.append(f"   스프레드 ${spread_mtm:+,.2f} + 펀딩 ${funding:+,.2f} - 수수료 ${fees:,.2f}")
 
                 try:
                     mp = self.cfg.mode_params(mode)
@@ -948,10 +1000,14 @@ class DeltaNeutralBot:
                     min_remaining = max(0, min_hold_sec - hold_seconds)
                     min_str = "✓" if min_remaining == 0 else (f"{min_remaining/3600:.1f}h" if min_remaining >= 3600 else f"{int(min_remaining/60)}분")
                     max_remaining_h = max(0, self.cfg.MAX_HOLD_DAYS * 86400 - hold_seconds) / 3600
-                    progress = (spread_mtm / mp['spread_exit'] * 100) if (mp['spread_exit'] > 0 and spread_mtm > 0) else 0
+                    # 청산 트리거 비교값: real_pnl 우선, 없으면 spread_mtm
+                    trigger_pnl = real_pnl if real_pnl is not None else spread_mtm
+                    progress = (trigger_pnl / mp['spread_exit'] * 100) if (mp['spread_exit'] > 0 and trigger_pnl > 0) else 0
 
                     lines.append("")
                     lines.append(f"⏱ 익절 ≥ +${mp['spread_exit']:.0f} ({progress:.0f}%) · 손절 ≤ ${self.cfg.SPREAD_STOPLOSS:.0f}")
+                    if mode == "VOLUME_URGENT" and real_pnl is not None:
+                        lines.append(f"   URGENT 본전청산: 실잔고 PnL ≥ \\$0 (현재 ${real_pnl:+.2f})")
                     lines.append(f"   min_hold {mp['min_hold_hours']:.1f}h ({min_str}) · max_hold {max_remaining_h:.0f}h 남음")
                 except Exception:
                     pass

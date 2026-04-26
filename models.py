@@ -62,14 +62,18 @@ class Cycle:
     entry_grvt_price: float
     exit_nado_price: float
     exit_grvt_price: float
-    funding_pnl: float
-    spread_pnl: float
-    fee_cost: float
+    funding_pnl: float  # 봇 내부 추정 (continuous approximation)
+    spread_pnl: float   # 가격 변동 추정
+    fee_cost: float     # 봇 내부 추정 수수료
     exit_reason: str
     volume_generated: float
+    real_pnl: float = 0.0  # 실잔고 변동 (entry → exit) — 가장 정확한 PnL
 
     @property
     def net_pnl(self) -> float:
+        # 실잔고 기반이 있으면 그것을 사용, 없으면 추정치 합산 (구버전 호환)
+        if self.real_pnl != 0.0:
+            return self.real_pnl
         return self.funding_pnl + self.spread_pnl - self.fee_cost
 
     def to_jsonl(self) -> str:
@@ -143,6 +147,7 @@ class BotState:
     cumulative_fees: float = 0.0
     nado_balance: float = 0.0
     grvt_balance: float = 0.0
+    entry_total_balance: float = 0.0  # 진입 직전 실제 잔고 합 (URGENT break-even 비교용)
     positions: dict = field(default_factory=dict)
     earn: dict = field(default_factory=dict)
     boost_config: dict = field(default_factory=dict)
@@ -161,6 +166,7 @@ class BotState:
             "cumulative_fees": self.cumulative_fees,
             "nado_balance": self.nado_balance,
             "grvt_balance": self.grvt_balance,
+            "entry_total_balance": self.entry_total_balance,
             "positions": self.positions,
             "earn": self.earn,
             "boost_config": self.boost_config,
@@ -187,6 +193,7 @@ class BotState:
             cumulative_fees=d.get("cumulative_fees", 0),
             nado_balance=d.get("nado_balance", 0),
             grvt_balance=d.get("grvt_balance", 0),
+            entry_total_balance=d.get("entry_total_balance", 0),
             positions=d.get("positions", {}),
             earn=d.get("earn", {}),
             exit_reason=d.get("exit_reason", ""),
