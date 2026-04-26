@@ -472,6 +472,8 @@ class DeltaNeutralBot:
                     "pair": pair, "nado_rate": nado_rate, "grvt_rate": grvt_rate,
                     "funding_income": funding_income, "cumulative": self._state.cumulative_funding,
                 })
+                # cumulative_funding은 메모리 누적 — 크래시/재시작 시 디스크 미반영이면 증발
+                self._save_state()
 
         self._log_jsonl("spread_history.jsonl", {
             "pair": pair, "mode": self._state.mode.value,
@@ -997,7 +999,7 @@ class DeltaNeutralBot:
                 lines.append(DIV_LIGHT)
                 lines.append(f"📍 <b>포지션</b> · 헷지 {imbalance:.1f}% {delta_emoji}")
                 lines.append(f"   NADO {nado_pos.side}  ${nado_pos.notional:,.0f} · 실효 {nado_eff_lev:.1f}x cross")
-                lines.append(f"   GRVT {grvt_pos.side}  ${grvt_pos.notional:,.0f} · {grvt_eff_lev}x isolated")
+                lines.append(f"   GRVT {grvt_pos.side}  ${grvt_pos.notional:,.0f} · {grvt_eff_lev}x cross")
                 lines.append(f"   <code>진입가 → 현재가</code>")
                 lines.append(f"   N {_fmt_price(nado_pos.entry_price)} → {_fmt_price(nado_curr)}  ({nado_chg:+.2f}%)")
                 lines.append(f"   G {_fmt_price(grvt_pos.entry_price)} → {_fmt_price(grvt_curr)}  ({grvt_chg:+.2f}%)")
@@ -1249,6 +1251,8 @@ class DeltaNeutralBot:
                         self._last_balance_check = now
                         self._state.nado_balance = await self._nado.get_balance()
                         self._state.grvt_balance = await self._grvt.get_balance()
+                        # 잔고도 메모리 갱신 후 디스크 동기화 (5분 주기, 부담 없음)
+                        self._save_state()
 
                     if now - self._last_status_log > 60:
                         self._last_status_log = now
