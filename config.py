@@ -85,8 +85,11 @@ class Config:
         self.EXIT_CHUNKS = 5  # 청산 시 5개 청크로 분할 실행
         self.CHUNK_RETRY = 2  # 청크 재시도 횟수
         self.CHUNK_WAIT = 30  # 청크 간 대기 시간 (초)
-        self.SLIPPAGE_PCT = 0.004  # 0.4% 슬리피지
+        self.SLIPPAGE_PCT = 0.004  # 0.4% 슬리피지 (taker fallback 가격)
         self.EMERGENCY_SLIPPAGE_PCT = 0.01  # 긴급 상황 1% 슬리피지
+        self.GRVT_MAKER_OFFSET_PCT = 0.0005  # GRVT post_only 호가 (mark에서 5 bps 안쪽, maker-side)
+        self.GRVT_MAKER_POLL_COUNT = 2  # post_only 체결 폴링 횟수
+        self.GRVT_MAKER_POLL_INTERVAL = 1.5  # 폴링 간격 (초) — 총 ~3초 maker 대기 후 taker fallback
         self.MARGIN_BUFFER = 0.65  # 마진 버퍼 (유효마진의 65%, NADO account health 여유 확보)
         self.POLL_BALANCE_SECONDS = 300  # 잔고 폴링 (5분)
         self.POLL_FUNDING_SECONDS = 3600  # 펀딩 폴링 (1시간)

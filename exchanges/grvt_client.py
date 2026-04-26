@@ -250,25 +250,27 @@ class GrvtClient(BaseExchangeClient):
 
     async def place_limit_order(
         self, symbol: str, side: str, size: float, price: float,
+        post_only: bool = False, poll_count: int = 3, poll_interval: float = 2.0,
     ) -> OrderResult:
         try:
             grvt_sym = self._grvt_symbol(symbol)
             price, size = self._align_tick(grvt_sym, price, size)
             if size <= 0:
                 return OrderResult(order_id="", status="error", message="size too small after tick alignment")
+            params = {"post_only": True} if post_only else {}
             result = await self._retry(
                 self._api.create_order,
                 grvt_sym, "limit", side.lower(), size, price,
-                {},
+                params,
             )
             if result:
                 coid, status, filled = self._parse_order_response(result)
 
                 if not self._is_filled(status, filled):
                     if coid:
-                        logger.info(f"GRVT {symbol} order coid={coid} status={status}, waiting for fill...")
-                        for _poll in range(3):
-                            await asyncio.sleep(2)
+                        logger.info(f"GRVT {symbol} order coid={coid} status={status} (post_only={post_only}), waiting for fill...")
+                        for _poll in range(poll_count):
+                            await asyncio.sleep(poll_interval)
                             try:
                                 order_info = await self._retry(
                                     self._api.fetch_order, params={"client_order_id": coid},
@@ -324,31 +326,41 @@ class GrvtClient(BaseExchangeClient):
 
     async def close_position(
         self, symbol: str, side: str, size: float, slippage_pct: float = 0.01,
+        post_only: bool = False, poll_count: int = 3, poll_interval: float = 2.0,
     ) -> bool:
         price = await self.get_mark_price(symbol)
         if not price:
             return False
-        if side.upper() == "LONG":
-            close_side, close_price = "sell", price * (1 - slippage_pct)
+        # post_only=True 면 close_side가 maker-side에 놓이도록 부호 반전.
+        # LONG 청산은 SELL인데, post_only면 mark 위쪽(maker)에 호가, 그렇지 않으면 mark 아래(taker).
+        if post_only:
+            if side.upper() == "LONG":
+                close_side, close_price = "sell", price * (1 + slippage_pct)
+            else:
+                close_side, close_price = "buy", price * (1 - slippage_pct)
         else:
-            close_side, close_price = "buy", price * (1 + slippage_pct)
+            if side.upper() == "LONG":
+                close_side, close_price = "sell", price * (1 - slippage_pct)
+            else:
+                close_side, close_price = "buy", price * (1 + slippage_pct)
         try:
             grvt_sym = self._grvt_symbol(symbol)
             close_price, size = self._align_tick(grvt_sym, close_price, size)
             if size <= 0:
                 return False
+            params = {"post_only": True} if post_only else {}
             result = await self._retry(
                 self._api.create_order,
-                grvt_sym, "limit", close_side, size, close_price,
+                grvt_sym, "limit", close_side, size, close_price, params,
             )
             if result:
                 coid, status, filled = self._parse_order_response(result)
 
                 if not self._is_filled(status, filled):
                     if coid:
-                        logger.info(f"GRVT close {symbol} coid={coid} status={status}, polling...")
-                        for _poll in range(3):
-                            await asyncio.sleep(2)
+                        logger.info(f"GRVT close {symbol} coid={coid} status={status} (post_only={post_only}), polling...")
+                        for _poll in range(poll_count):
+                            await asyncio.sleep(poll_interval)
                             try:
                                 order_info = await self._retry(
                                     self._api.fetch_order, params={"client_order_id": coid},

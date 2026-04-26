@@ -660,11 +660,30 @@ class DeltaNeutralBot:
                         await asyncio.sleep(5)
                     continue
 
-                # NADO 성공 → GRVT 진입
+                # NADO 성공 → GRVT 진입.
+                # 1차: maker(post_only). mark에서 GRVT_MAKER_OFFSET_PCT 만큼 maker-side 호가.
+                #      ~3초 폴링 후 미체결이면 cancel.
+                # 2차: taker fallback. 기존 SLIPPAGE_PCT 가격으로 즉시 체결 시도.
+                maker_offset = self.cfg.GRVT_MAKER_OFFSET_PCT
+                grvt_maker_price = (
+                    grvt_price * (1 + maker_offset) if grvt_side == "SELL"
+                    else grvt_price * (1 - maker_offset)
+                )
                 grvt_res = await self._grvt.place_limit_order(
-                    pair, grvt_side, grvt_qty, grvt_order_price,
+                    pair, grvt_side, grvt_qty, grvt_maker_price,
+                    post_only=True,
+                    poll_count=self.cfg.GRVT_MAKER_POLL_COUNT,
+                    poll_interval=self.cfg.GRVT_MAKER_POLL_INTERVAL,
                 )
                 grvt_ok = grvt_res.status in ("filled", "closed")
+                if grvt_ok:
+                    logger.info(f"Chunk {i+1}: GRVT maker fill at ${grvt_res.filled_price:.4f}")
+                else:
+                    logger.info(f"Chunk {i+1}: GRVT maker miss (status={grvt_res.status}), taker fallback")
+                    grvt_res = await self._grvt.place_limit_order(
+                        pair, grvt_side, grvt_qty, grvt_order_price,
+                    )
+                    grvt_ok = grvt_res.status in ("filled", "closed")
 
                 if nado_ok and grvt_ok:
                     nado_filled_qty += nado_res.filled_size
@@ -765,6 +784,23 @@ class DeltaNeutralBot:
             return "ok"
         return "nado_max_oi" if nado_oi_fail else "nado_health" if nado_health_fail else "failed"
 
+    async def _grvt_close_maker_first(self, pair: str, side: str, size: float) -> bool:
+        """GRVT 청산: post_only maker → 실패 시 taker fallback. 진입과 같은 패턴."""
+        ok = await self._grvt.close_position(
+            pair, side, size,
+            slippage_pct=self.cfg.GRVT_MAKER_OFFSET_PCT,
+            post_only=True,
+            poll_count=self.cfg.GRVT_MAKER_POLL_COUNT,
+            poll_interval=self.cfg.GRVT_MAKER_POLL_INTERVAL,
+        )
+        if ok:
+            logger.info(f"GRVT exit {pair} maker fill")
+            return True
+        logger.info(f"GRVT exit {pair} maker miss, taker fallback")
+        return await self._grvt.close_position(
+            pair, side, size, slippage_pct=self.cfg.EMERGENCY_SLIPPAGE_PCT,
+        )
+
     async def _execute_exit(self, pair: str) -> bool:
         if not self._positions:
             return True
@@ -787,7 +823,8 @@ class DeltaNeutralBot:
                 labels.append("nado")
             if grvt_pos and grvt_total_size > 0:
                 chunk_qty = grvt_total_size / chunks
-                tasks.append(self._grvt.close_position(pair, grvt_pos.side, chunk_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT))
+                # GRVT 메인 청산: maker 우선 (rebate 캡처), 실패 시 taker fallback
+                tasks.append(self._grvt_close_maker_first(pair, grvt_pos.side, chunk_qty))
                 labels.append("grvt")
             if tasks:
                 # gather results — bool is what each close_position returns; failures need attention

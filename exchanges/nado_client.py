@@ -188,7 +188,7 @@ class NadoClient(BaseExchangeClient):
 
     async def place_limit_order(
         self, symbol: str, side: str, size: float, price: float,
-        isolated_margin: float = 0,
+        isolated_margin: float = 0, post_only: bool = False,
     ) -> OrderResult:
         try:
             from nado_protocol.utils.nonce import gen_order_nonce
@@ -226,7 +226,8 @@ class NadoClient(BaseExchangeClient):
                     digest=None, signature=None, spot_leverage=None,
                 )
 
-            appendix = build_appendix(OrderType.DEFAULT)
+            order_type = OrderType.POST_ONLY if post_only else OrderType.DEFAULT
+            appendix = build_appendix(order_type)
             try:
                 result = await asyncio.to_thread(
                     self._client.market.place_order, _build_params(_build_order(appendix))
@@ -240,9 +241,9 @@ class NadoClient(BaseExchangeClient):
                             if isolated_margin > 0:
                                 actual_margin = isolated_margin * _margin_mult
                                 margin_x6 = int(Decimal(str(actual_margin)) * 10**6)
-                                appendix = build_appendix(OrderType.DEFAULT, isolated=True, isolated_margin=margin_x6)
+                                appendix = build_appendix(order_type, isolated=True, isolated_margin=margin_x6)
                             else:
-                                appendix = build_appendix(OrderType.DEFAULT, isolated=True)
+                                appendix = build_appendix(order_type, isolated=True)
                                 if _margin_mult > 1:
                                     break
                             result = await asyncio.to_thread(
