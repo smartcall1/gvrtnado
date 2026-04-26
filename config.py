@@ -53,6 +53,13 @@ class Config:
         # 0: 정확히 본전 트리거 (확정 손실 위험)
         # 5+: 안전하지만 spread_exit(+$6)과 거의 중복, URGENT 발동 드묾
         self.URGENT_BREAK_EVEN_THRESHOLD = float(os.getenv("URGENT_BREAK_EVEN_THRESHOLD", "3"))
+        # URGENT bypass max unfavorable spread (%)
+        # 진입 시 거래소간 spread가 불리한 방향으로 이 % 이상이면 bypass 차단
+        # 예: 0.15% → $3K notional 기준 -$9 입장 손실까지만 인정 (펀딩으로 회복 가능)
+        # SOL 사고 케이스: 0.81% spread → -$25 입장 손실, 펀딩으로 24일 걸림 (회복 불가)
+        self.URGENT_MAX_UNFAVORABLE_SPREAD_PCT = float(
+            os.getenv("URGENT_MAX_UNFAVORABLE_SPREAD_PCT", "0.15")
+        )
 
         # ===== 모니터링 및 안전 설정 =====
         self.POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "3"))  # 초

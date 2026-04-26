@@ -237,7 +237,24 @@ class DeltaNeutralBot:
             if elapsed < 60:
                 logger.info(f"[ENTER] {pair} dir={direction} NADO=${self._nado_price:.1f} GRVT=${self._grvt_price:.1f} URGENT bypass in {60 - elapsed:.0f}s")
                 return
+            # URGENT bypass 가드 — spread가 너무 불리하면 차단 (펀딩으로 회복 불가능한 손실 방지)
             spread_pct = (self._nado_price - self._grvt_price) / self._grvt_price * 100
+            # Direction A: 우리는 NADO LONG/GRVT SHORT 원함 → NADO < GRVT 유리
+            #   → spread_pct (= nado-grvt 비율) 양수일수록 불리
+            # Direction B: 반대 → 음수일수록 불리
+            unfavorable_pct = spread_pct if direction == "A" else -spread_pct
+            if unfavorable_pct > self.cfg.URGENT_MAX_UNFAVORABLE_SPREAD_PCT:
+                logger.warning(
+                    f"[ENTER] URGENT bypass 차단! {pair} dir={direction} spread={spread_pct:+.3f}% "
+                    f"(불리 {unfavorable_pct:.3f}% > 임계 {self.cfg.URGENT_MAX_UNFAVORABLE_SPREAD_PCT}%) — 5분 차단"
+                )
+                await self._telegram.send_alert(
+                    f"[⚠️ SPREAD GUARD] {pair} 진입 spread {unfavorable_pct:+.2f}% 너무 불리 — 차단"
+                )
+                self._oi_blocked[pair] = time.time() + 300  # 5분 차단 (가격 수렴 대기)
+                self._state.cycle_state = CycleState.IDLE
+                self._save_state()
+                return
             logger.info(f"[ENTER] VOLUME_URGENT bypass! {pair} dir={direction} spread={spread_pct:+.3f}% — 강제 진입")
         else:
             logger.info(f"[ENTER] {pair} dir={direction} NADO=${self._nado_price:.1f} GRVT=${self._grvt_price:.1f} favorable=True — 진입")
