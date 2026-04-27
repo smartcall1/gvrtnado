@@ -87,9 +87,16 @@ class Config:
         self.CHUNK_WAIT = 30  # 청크 간 대기 시간 (초)
         self.SLIPPAGE_PCT = 0.004  # 0.4% 슬리피지 (taker fallback 가격)
         self.EMERGENCY_SLIPPAGE_PCT = 0.01  # 긴급 상황 1% 슬리피지
-        self.GRVT_MAKER_OFFSET_PCT = 0.0005  # GRVT post_only 호가 (mark에서 5 bps 안쪽, maker-side)
-        self.GRVT_MAKER_POLL_COUNT = 2  # post_only 체결 폴링 횟수
-        self.GRVT_MAKER_POLL_INTERVAL = 1.5  # 폴링 간격 (초) — 총 ~3초 maker 대기 후 taker fallback
+        self.GRVT_MAKER_OFFSET_PCT = 0.0005  # (구) GRVT post_only 호가 (XEMM 전환 후 미사용)
+        self.GRVT_MAKER_POLL_COUNT = 2  # (구) post_only 체결 폴링 횟수
+        self.GRVT_MAKER_POLL_INTERVAL = 1.5  # (구) 폴링 간격
+        # ===== XEMM 진입/청산: NADO maker → GRVT taker =====
+        # NADO를 maker(post_only)로 먼저 채워 노출 0초 보장 + maker fee 1bps 적용,
+        # GRVT는 taker로 즉시 헷지. delta_donemoji XEMM 패턴과 동일.
+        self.NADO_MAKER_OFFSET_PCT = float(os.getenv("NADO_MAKER_OFFSET_PCT", "0.0001"))  # 시작 backoff 1bp
+        self.NADO_MAKER_TIMEOUT_SECONDS = int(os.getenv("NADO_MAKER_TIMEOUT_SECONDS", "60"))
+        self.NADO_MAKER_RETRY_LIMIT = int(os.getenv("NADO_MAKER_RETRY_LIMIT", "5"))
+        self.NADO_MAKER_POLL_INTERVAL = float(os.getenv("NADO_MAKER_POLL_INTERVAL", "2.0"))
         self.MARGIN_BUFFER = 0.65  # 마진 버퍼 (유효마진의 65%, NADO account health 여유 확보)
         self.POLL_BALANCE_SECONDS = 300  # 잔고 폴링 (5분)
         self.POLL_FUNDING_SECONDS = 3600  # 펀딩 폴링 (1시간)
@@ -108,7 +115,8 @@ class Config:
 
         # ===== 수수료 설정 (bps, basis points) =====
         self.NADO_MAKER_FEE_BPS = 1.0  # NADO 메이커 수수료 1 bps
-        self.GRVT_MAKER_FEE_BPS = -0.01  # GRVT 메이커 리베이트 -0.01 bps
+        self.GRVT_MAKER_FEE_BPS = -0.01  # (참고) GRVT 메이커 리베이트
+        self.GRVT_TAKER_FEE_BPS = 4.5  # GRVT 테이커 4.5 bps (XEMM 모드에서 사용, Tier 1 가정)
 
     def validate(self) -> list[str]:
         """
@@ -175,7 +183,8 @@ class Config:
         Returns:
             float: 예상 왕복 수수료 (USD)
         """
+        # XEMM 패턴: NADO maker(1bps) × 2 + GRVT taker(4.5bps) × 2 = 11bps round-trip
         # 진입과 청산 각각 수수료 부과 (2×)
         nado_fee = notional * 2 * (self.NADO_MAKER_FEE_BPS / 10_000)
-        grvt_fee = notional * 2 * (self.GRVT_MAKER_FEE_BPS / 10_000)
+        grvt_fee = notional * 2 * (self.GRVT_TAKER_FEE_BPS / 10_000)
         return nado_fee + grvt_fee

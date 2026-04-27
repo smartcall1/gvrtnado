@@ -57,13 +57,13 @@ def test_mode_params():
 
 
 def test_estimate_round_trip_fee():
-    """테스트: 왕복 수수료 계산"""
+    """테스트: 왕복 수수료 계산 — XEMM 모드(NADO maker + GRVT taker)"""
     cfg = Config()
-    # NADO: 1.0 bps maker, GRVT: -0.01 bps maker
-    # notional = 100: 100 * 2 * (1.0/10000) + 100 * 2 * (-0.01/10000)
-    # = 0.02 - 0.0002 = 0.0198
+    # NADO maker 1.0 bps + GRVT taker 4.5 bps, 양쪽 진입+청산이라 ×2
+    # notional = 100: 100 * 2 * (1.0/10000) + 100 * 2 * (4.5/10000)
+    # = 0.02 + 0.09 = 0.11
     fee = cfg.estimate_round_trip_fee(100.0)
-    expected = 100.0 * 2 * (1.0 / 10_000) + 100.0 * 2 * (-0.01 / 10_000)
+    expected = 100.0 * 2 * (cfg.NADO_MAKER_FEE_BPS / 10_000) + 100.0 * 2 * (cfg.GRVT_TAKER_FEE_BPS / 10_000)
     assert abs(fee - expected) < 0.001
 
 
