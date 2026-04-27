@@ -788,6 +788,42 @@ class DeltaNeutralBot:
                 notional=grvt_notional, entry_price=grvt_vwap,
                 leverage=self.cfg.LEVERAGE, margin=grvt_margin,
             )
+
+            # 진입 완료 후 거래소 실제 사이즈 재동기화 (안전장치).
+            # 응급 청산 실패 같은 엣지 케이스로 tracking이 거래소와 어긋날 수 있음.
+            # 1% 초과 drift 감지 시 _positions를 실측값으로 보정.
+            try:
+                nado_real = await self._nado.get_positions(pair)
+                grvt_real = await self._grvt.get_positions(pair)
+                if nado_real:
+                    nado_actual = abs(float(nado_real[0].get("size", nado_real[0].get("amount", 0))))
+                    if nado_actual > 0 and abs(nado_actual - nado_filled_qty) > nado_filled_qty * 0.01:
+                        actual_notional = nado_actual * nado_vwap
+                        logger.warning(
+                            f"[ENTRY SYNC] NADO drift: tracked qty {nado_filled_qty:.6f} → 실측 {nado_actual:.6f} "
+                            f"(notional ${nado_notional:.0f} → ${actual_notional:.0f})"
+                        )
+                        await self._telegram.send_alert(
+                            f"[⚠️ ENTRY SYNC] NADO {pair} 실측과 차이 — tracking 보정"
+                        )
+                        self._positions["nado"].notional = actual_notional
+                        self._positions["nado"].margin = actual_notional / self.cfg.LEVERAGE
+                if grvt_real:
+                    grvt_actual = abs(float(grvt_real[0].get("size", grvt_real[0].get("contracts", 0))))
+                    if grvt_actual > 0 and abs(grvt_actual - grvt_filled_qty) > grvt_filled_qty * 0.01:
+                        actual_notional = grvt_actual * grvt_vwap
+                        logger.warning(
+                            f"[ENTRY SYNC] GRVT drift: tracked qty {grvt_filled_qty:.6f} → 실측 {grvt_actual:.6f} "
+                            f"(notional ${grvt_notional:.0f} → ${actual_notional:.0f})"
+                        )
+                        await self._telegram.send_alert(
+                            f"[⚠️ ENTRY SYNC] GRVT {pair} 실측과 차이 — tracking 보정"
+                        )
+                        self._positions["grvt"].notional = actual_notional
+                        self._positions["grvt"].margin = actual_notional / self.cfg.LEVERAGE
+            except Exception as e:
+                logger.warning(f"[ENTRY SYNC] 거래소 사이즈 조회 실패 (tracking 그대로 사용): {e}")
+
             return "ok"
         return "nado_max_oi" if nado_oi_fail else "nado_health" if nado_health_fail else "failed"
 
