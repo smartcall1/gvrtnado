@@ -729,7 +729,8 @@ class DeltaNeutralBot:
         if nado_notional > 0 and grvt_notional > 0:
             avg_notional = (nado_notional + grvt_notional) / 2
             imbalance = abs(nado_notional - grvt_notional) / avg_notional if avg_notional > 0 else 0
-            if imbalance > 0.05:
+            # Bug C 강화 (2026-04-27): 임계값 5% → 2% (delta_donemoji 사고 5.87% 케이스도 잡힘)
+            if imbalance > 0.02:
                 logger.warning(f"Notional imbalance {imbalance:.1%}: NADO=${nado_notional:,.0f} GRVT=${grvt_notional:,.0f} — rolling back all")
                 await self._telegram.send_alert(f"[⚠️ IMBALANCE] {imbalance:.1%} — 전량 롤백")
                 await self._nado.cancel_all_orders(pair)
@@ -830,11 +831,28 @@ class DeltaNeutralBot:
     async def _grvt_open_with_xemm(
         self, pair: str, side: str, qty: float,
     ) -> tuple[bool, float, float]:
-        """GRVT maker 진입 — post_only + 1bp backoff retry + 최종 taker fallback.
+        """GRVT maker 진입 — 부분 체결 누적 인식 + 시도마다 잔량 재계산 (Bug C 방어).
 
-        Returns: (success, filled_qty, filled_price)
+        Bug C 컨텍스트 (2026-04-27 delta_donemoji_bot 사고):
+        - SDK `_is_filled` 가 `filled > 0` 도 True 반환 → 부분 체결도 "filled" 처리
+        - SDK 가 is_done=True 시 cancel 안 함 (grvt_client.py:287) → 미체결분 책에 잔존
+        - 카운터파티 추가 체결 시 GRVT만 누적 초과 → NADO 헷지 깨짐
+
+        수정:
+        1. 시도마다 잔량(qty - total_filled) 만 발주 (중복 누적 차단)
+        2. 매 시도 후 명시적 cancel_all_orders (잔존 주문 제거)
+        3. 부분 체결분 누적 → 부족분만 다음 시도 또는 taker로 보충
+
+        Returns: (success, total_filled_qty, avg_filled_price)
         """
+        total_filled = 0.0
+        total_cost = 0.0
+
         for attempt in range(self.cfg.GRVT_MAKER_RETRY_LIMIT):
+            remaining = qty - total_filled
+            if remaining <= qty * 0.02:  # 2% 이내면 충분
+                break
+
             try:
                 mark = await self._grvt.get_mark_price(pair)
                 if not mark or mark <= 0:
@@ -851,82 +869,163 @@ class DeltaNeutralBot:
                 poll_n = max(1, int(
                     self.cfg.GRVT_MAKER_TIMEOUT_SECONDS / self.cfg.GRVT_MAKER_POLL_INTERVAL_SEC
                 ))
+                # 잔량(remaining) 만 새로 발주 — 이전 시도 부분 체결분은 누적
                 res = await self._grvt.place_limit_order(
-                    pair, side, qty, maker_price,
+                    pair, side, remaining, maker_price,
                     post_only=True,
                     poll_count=poll_n,
                     poll_interval=self.cfg.GRVT_MAKER_POLL_INTERVAL_SEC,
                 )
-                if res.status in ("filled", "closed"):
-                    logger.info(
-                        f"GRVT maker fill (attempt {attempt+1}, qty {qty:.6f} @ {maker_price:.4f})"
-                    )
-                    return True, res.filled_size, res.filled_price
 
-                # 미체결 → cancel + 다음 시도
+                if res.filled_size > 0:
+                    total_filled += res.filled_size
+                    total_cost += res.filled_size * res.filled_price
+                    logger.info(
+                        f"GRVT maker attempt {attempt+1}: +{res.filled_size:.6f} @ {res.filled_price:.4f} "
+                        f"(누적 {total_filled:.6f}/{qty:.6f})"
+                    )
+
+                # 명시적 cancel — SDK가 partial fill 시 cancel 안 했을 수 있음 (책 잔존 차단)
                 try:
                     await self._grvt.cancel_all_orders(pair)
                 except Exception:
                     pass
+
+                if total_filled >= qty * 0.98:
+                    avg_price = total_cost / total_filled
+                    return True, total_filled, avg_price
+
                 logger.info(
-                    f"GRVT maker miss, retry {attempt+1}/{self.cfg.GRVT_MAKER_RETRY_LIMIT} "
-                    f"(backoff {offset*10000:.1f}bp)"
+                    f"GRVT maker 부족, retry {attempt+1}/{self.cfg.GRVT_MAKER_RETRY_LIMIT} "
+                    f"(누적 {total_filled:.6f}/{qty:.6f}, backoff {offset*10000:.1f}bp)"
                 )
             except Exception as e:
                 logger.error(f"GRVT maker attempt {attempt+1} error: {e}")
                 await asyncio.sleep(2)
 
-        # All retries exhausted - taker fallback
-        logger.warning(f"GRVT maker all attempts failed, taker fallback")
+        # 모든 maker 시도 후 부족분 → taker fallback
+        remaining = qty - total_filled
+        if remaining <= qty * 0.02:
+            avg_price = total_cost / total_filled if total_filled > 0 else 0.0
+            return True, total_filled, avg_price
+
+        logger.warning(
+            f"GRVT maker {self.cfg.GRVT_MAKER_RETRY_LIMIT}회 부족 ({total_filled:.6f}/{qty:.6f}), "
+            f"taker fallback {remaining:.6f}"
+        )
         try:
             mark = await self._grvt.get_mark_price(pair)
-            if not mark:
-                return False, 0.0, 0.0
-            slip = self.cfg.SLIPPAGE_PCT
-            taker_price = mark * (1 - slip) if side.upper() == "SELL" else mark * (1 + slip)
-            res = await self._grvt.place_limit_order(pair, side, qty, taker_price)
-            if res.status in ("filled", "closed"):
-                return True, res.filled_size, res.filled_price
+            if mark:
+                slip = self.cfg.SLIPPAGE_PCT
+                taker_price = mark * (1 - slip) if side.upper() == "SELL" else mark * (1 + slip)
+                res = await self._grvt.place_limit_order(pair, side, remaining, taker_price)
+                if res.filled_size > 0:
+                    total_filled += res.filled_size
+                    total_cost += res.filled_size * res.filled_price
         except Exception as e:
             logger.error(f"GRVT taker fallback failed: {e}")
+
+        if total_filled > 0:
+            avg_price = total_cost / total_filled
+            success = total_filled >= qty * 0.95
+            return success, total_filled, avg_price
         return False, 0.0, 0.0
 
     async def _grvt_close_with_xemm(self, pair: str, side: str, qty: float) -> bool:
-        """GRVT maker 청산 — post_only + backoff retry + 최종 taker fallback.
+        """GRVT maker 청산 — 부분 체결 누적 인식 + 시도마다 잔량 재조회 (Bug C 방어).
+
+        Bug C 컨텍스트: close_position 은 bool 반환 → 부분 체결분 알 수 없음.
+        매 시도 직전에 거래소에서 직접 포지션 사이즈 조회하여 실제 청산량 추적.
 
         side: 현재 포지션 방향 ("LONG"/"SHORT"). close_position 내부가 close_side 자동 결정.
         """
+        # 청산 시작 시점 포지션 사이즈
+        try:
+            init_pos = await self._grvt.get_positions(pair)
+            init_size = (
+                abs(float(init_pos[0].get("size", init_pos[0].get("contracts", 0))))
+                if init_pos else qty
+            )
+        except Exception:
+            init_size = qty
+
         for attempt in range(self.cfg.GRVT_MAKER_RETRY_LIMIT):
             try:
+                # 매 시도 직전 잔량 재조회 — 이전 시도 부분 체결분 자동 차감
+                cur_pos = await self._grvt.get_positions(pair)
+                cur_size = (
+                    abs(float(cur_pos[0].get("size", cur_pos[0].get("contracts", 0))))
+                    if cur_pos else init_size
+                )
+                already_closed = init_size - cur_size
+                remaining = qty - already_closed
+                if remaining <= qty * 0.02:
+                    logger.info(
+                        f"GRVT close 충분히 닫힘 ({already_closed:.6f}/{qty:.6f})"
+                    )
+                    return True
+
                 offset = self.cfg.GRVT_MAKER_OFFSET_PCT * (attempt + 1)
-                ok = await self._grvt.close_position(
-                    pair, side, qty,
-                    slippage_pct=offset,  # maker-side offset
+                # 잔량(remaining) 만 새로 발주
+                await self._grvt.close_position(
+                    pair, side, remaining,
+                    slippage_pct=offset,
                     post_only=True,
                     poll_count=max(1, int(
                         self.cfg.GRVT_MAKER_TIMEOUT_SECONDS / self.cfg.GRVT_MAKER_POLL_INTERVAL_SEC
                     )),
                     poll_interval=self.cfg.GRVT_MAKER_POLL_INTERVAL_SEC,
                 )
-                if ok:
-                    logger.info(f"GRVT close maker fill (attempt {attempt+1})")
-                    return True
+
+                # 명시적 cancel — partial fill 시 SDK가 cancel 안 했을 수 있음
                 try:
                     await self._grvt.cancel_all_orders(pair)
                 except Exception:
                     pass
+
+                # 실측으로 확인 — close_position bool 반환은 부분 체결도 True 가능
+                after_pos = await self._grvt.get_positions(pair)
+                after_size = (
+                    abs(float(after_pos[0].get("size", after_pos[0].get("contracts", 0))))
+                    if after_pos else cur_size
+                )
+                actual_closed = init_size - after_size
+                if actual_closed >= qty * 0.98:
+                    logger.info(
+                        f"GRVT close maker 청크 완료 (시도 {attempt+1}, 누적 {actual_closed:.6f}/{qty:.6f})"
+                    )
+                    return True
+
                 logger.info(
-                    f"GRVT close maker timeout, retry {attempt+1}/{self.cfg.GRVT_MAKER_RETRY_LIMIT}"
+                    f"GRVT close maker 부족, retry {attempt+1}/{self.cfg.GRVT_MAKER_RETRY_LIMIT} "
+                    f"(누적 {actual_closed:.6f}/{qty:.6f})"
                 )
             except Exception as e:
                 logger.error(f"GRVT close maker attempt {attempt+1} error: {e}")
                 await asyncio.sleep(2)
 
-        # taker fallback
-        logger.warning(f"GRVT close maker all attempts failed, taker fallback")
-        return await self._grvt.close_position(
-            pair, side, qty, slippage_pct=self.cfg.SLIPPAGE_PCT,
-        )
+        # taker fallback for remaining
+        try:
+            cur_pos = await self._grvt.get_positions(pair)
+            cur_size = (
+                abs(float(cur_pos[0].get("size", cur_pos[0].get("contracts", 0))))
+                if cur_pos else 0
+            )
+            already_closed = init_size - cur_size
+            remaining = qty - already_closed
+            if remaining <= qty * 0.02:
+                return True
+
+            logger.warning(
+                f"GRVT close maker 부족 ({already_closed:.6f}/{qty:.6f}), "
+                f"taker fallback {remaining:.6f}"
+            )
+            return await self._grvt.close_position(
+                pair, side, remaining, slippage_pct=self.cfg.SLIPPAGE_PCT,
+            )
+        except Exception as e:
+            logger.error(f"GRVT close taker fallback failed: {e}")
+        return False
 
     async def _execute_exit(self, pair: str) -> bool:
         if not self._positions:
@@ -936,17 +1035,27 @@ class DeltaNeutralBot:
         grvt_pos = self._positions.get("grvt")
         chunks = self.cfg.EXIT_CHUNKS
 
-        nado_real = await self._nado.get_positions(pair)
-        grvt_real = await self._grvt.get_positions(pair)
-        nado_total_size = abs(float(nado_real[0].get("size", nado_real[0].get("amount", 0)))) if nado_real else 0
-        grvt_total_size = abs(float(grvt_real[0].get("size", grvt_real[0].get("contracts", 0)))) if grvt_real else 0
-
         for i in range(chunks):
             # ── XEMM 청산 (저비용): GRVT maker close → 체결 확인 → NADO taker close ──
             # 청산은 OI cap 무관 (포지션을 줄이는 방향). 항상 저비용 경로 사용.
             # GRVT maker rebate -0.01bp + NADO taker 1bp ≈ 1bp/leg. 진입과 합쳐 round-trip 약 2bp.
-            nado_chunk_qty = nado_total_size / chunks if nado_pos and nado_total_size > 0 else 0
-            grvt_chunk_qty = grvt_total_size / chunks if grvt_pos and grvt_total_size > 0 else 0
+            #
+            # Bug C 방어 (2026-04-27): 매 청크 시작 시 거래소에서 직접 잔량 재조회.
+            # 이전 청크 부분 체결분이 자동 차감되어 다음 청크 qty 정확히 산정됨.
+            chunks_left = chunks - i
+            nado_real = await self._nado.get_positions(pair)
+            grvt_real = await self._grvt.get_positions(pair)
+            nado_remaining = abs(float(nado_real[0].get("size", nado_real[0].get("amount", 0)))) if nado_real else 0
+            grvt_remaining = abs(float(grvt_real[0].get("size", grvt_real[0].get("contracts", 0)))) if grvt_real else 0
+
+            if nado_remaining <= 0.001 and grvt_remaining <= 0.001:
+                logger.info(f"Exit 청산 완료 (잔량 0) — 청크 {i+1} 중단")
+                break
+
+            # 마지막 청크는 잔량 전체, 아니면 남은 청크 수로 균등 분할
+            is_last = (chunks_left == 1)
+            nado_chunk_qty = nado_remaining if is_last else nado_remaining / chunks_left
+            grvt_chunk_qty = grvt_remaining if is_last else grvt_remaining / chunks_left
 
             # Step 1: GRVT maker close (미체결 시 내부 taker fallback)
             grvt_done = True
