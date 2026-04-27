@@ -119,6 +119,8 @@ class DeltaNeutralBot:
             await self._handle_exit()
         elif state == CycleState.COOLDOWN:
             await self._handle_cooldown()
+        elif state == CycleState.MANUAL_INTERVENTION:
+            await self._handle_manual_intervention()
 
     def _prune_oi_blocked(self):
         now = time.time()
@@ -588,6 +590,43 @@ class DeltaNeutralBot:
         if time.time() >= self._state.cooldown_until:
             self._state.cycle_state = CycleState.IDLE
             self._save_state()
+
+    async def _handle_manual_intervention(self):
+        """_emergency_exit 실패 후 진입 — 잔여 포지션 자동 거래 중단.
+        양쪽 거래소 모두 포지션 0 감지 시 IDLE 자동 복귀.
+        30분마다 reminder 알림.
+        """
+        pair = self._state.pair
+        try:
+            nado_pos = await self._nado.get_positions(pair)
+            grvt_pos = await self._grvt.get_positions(pair)
+        except Exception as e:
+            logger.warning(f"MANUAL: 포지션 조회 실패 (계속 대기): {e}")
+            return
+
+        nado_size = abs(float(nado_pos[0].get("size", nado_pos[0].get("amount", 0)))) if nado_pos else 0
+        grvt_size = abs(float(grvt_pos[0].get("size", grvt_pos[0].get("contracts", 0)))) if grvt_pos else 0
+
+        if nado_size <= 0.001 and grvt_size <= 0.001:
+            logger.info(f"MANUAL_INTERVENTION: {pair} 양쪽 포지션 0 감지 → COOLDOWN 60s")
+            self._positions.clear()
+            self._state.cooldown_until = time.time() + 60
+            self._state.cycle_state = CycleState.COOLDOWN  # 60s 후 _handle_cooldown이 IDLE로 전환
+            self._save_state()
+            await self._telegram.send_alert(
+                f"[✅ MANUAL CLEAR] {pair} 수동 청산 감지 → 자동 거래 재개 (60s 쿨다운 후)"
+            )
+            return
+
+        # 30분마다 reminder
+        last_reminder = getattr(self, "_manual_last_reminder", 0)
+        if time.time() - last_reminder > 1800:
+            self._manual_last_reminder = time.time()
+            await self._telegram.send_alert(
+                f"[⛔ MANUAL] {pair} 봇 정지 중\n"
+                f"잔여: NADO {nado_size:.6f} / GRVT {grvt_size:.6f}\n"
+                f"양쪽 모두 청산하시면 자동 IDLE 복귀."
+            )
 
     # --- 청크 진입/퇴출 ---
 
@@ -1132,13 +1171,22 @@ class DeltaNeutralBot:
         success = await self._execute_exit(pair)
         if success:
             self._positions.clear()
+            self._state.cycle_state = CycleState.COOLDOWN
+            self._state.cooldown_until = time.time() + 60
+            self._save_state()
+            await self._telegram.send_alert(f"[🚨 EMERGENCY EXIT] {reason}")
         else:
-            logger.critical("Emergency exit FAILED — positions may still be open!")
-            await self._telegram.send_alert(f"[🚨 EXIT FAILED] {pair} 수동 청산 필요!")
-        self._state.cycle_state = CycleState.COOLDOWN
-        self._state.cooldown_until = time.time() + 60
-        self._save_state()
-        await self._telegram.send_alert(f"[🚨 EMERGENCY EXIT] {reason}")
+            # delta_donemoji_bot cycle 10 사건 회귀 방지: 청산 실패 후 COOLDOWN으로
+            # 가버리면 60s 뒤 IDLE → 신규 사이클 진입 → 잔여 포지션 위에 직선 노출 누적.
+            # MANUAL_INTERVENTION으로 가드하여 사용자 수동 청산까지 자동 거래 중단.
+            logger.critical("Emergency exit FAILED — MANUAL_INTERVENTION 전환")
+            self._state.cycle_state = CycleState.MANUAL_INTERVENTION
+            self._save_state()
+            await self._telegram.send_alert(
+                f"[⛔ EXIT FAILED] {pair} 수동 청산 필요!\n"
+                f"사유: {reason}\n"
+                f"양쪽 거래소 포지션을 수동으로 정리하시면 자동으로 IDLE 복귀."
+            )
 
     # --- Earn 관리 ---
 

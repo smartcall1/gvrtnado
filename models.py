@@ -14,6 +14,9 @@ class CycleState(Enum):
     HOLD = "HOLD"
     EXIT = "EXIT"
     COOLDOWN = "COOLDOWN"
+    # _emergency_exit 실패 시 진입 — 잔여 포지션 위에 신규 진입 차단.
+    # 사용자가 양쪽 거래소 수동 청산하면 _handle_manual_intervention이 자동 IDLE 복귀.
+    MANUAL_INTERVENTION = "MANUAL_INTERVENTION"
 
 
 class OperatingMode(Enum):
