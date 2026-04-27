@@ -87,16 +87,24 @@ class Config:
         self.CHUNK_WAIT = 30  # 청크 간 대기 시간 (초)
         self.SLIPPAGE_PCT = 0.004  # 0.4% 슬리피지 (taker fallback 가격)
         self.EMERGENCY_SLIPPAGE_PCT = 0.01  # 긴급 상황 1% 슬리피지
-        self.GRVT_MAKER_OFFSET_PCT = 0.0005  # (구) GRVT post_only 호가 (XEMM 전환 후 미사용)
-        self.GRVT_MAKER_POLL_COUNT = 2  # (구) post_only 체결 폴링 횟수
-        self.GRVT_MAKER_POLL_INTERVAL = 1.5  # (구) 폴링 간격
-        # ===== XEMM 진입/청산: NADO maker → GRVT taker =====
-        # NADO를 maker(post_only)로 먼저 채워 노출 0초 보장 + maker fee 1bps 적용,
-        # GRVT는 taker로 즉시 헷지. delta_donemoji XEMM 패턴과 동일.
-        self.NADO_MAKER_OFFSET_PCT = float(os.getenv("NADO_MAKER_OFFSET_PCT", "0.0001"))  # 시작 backoff 1bp
+        self.GRVT_MAKER_OFFSET_PCT = float(os.getenv("GRVT_MAKER_OFFSET_PCT", "0.0001"))  # 시작 backoff 1bp
+        self.GRVT_MAKER_POLL_COUNT = 2  # (legacy) GRVT close_position 내장 폴링용 — XEMM 외 경로
+        self.GRVT_MAKER_POLL_INTERVAL = 1.5
+        # ===== XEMM 패턴 — 두 갈래 =====
+        # 우선: GRVT maker(rebate -0.01bps) → NADO taker(1bps) — round-trip 약 2bps
+        #       (NADO OI capacity 사전 체크 통과 시 사용)
+        # Fallback: NADO maker(1bps) → GRVT taker(4.5bps) — round-trip 약 11bps
+        #          (OI cap 부족하거나 GRVT maker miss 시)
+        self.NADO_MAKER_OFFSET_PCT = float(os.getenv("NADO_MAKER_OFFSET_PCT", "0.0001"))
         self.NADO_MAKER_TIMEOUT_SECONDS = int(os.getenv("NADO_MAKER_TIMEOUT_SECONDS", "60"))
         self.NADO_MAKER_RETRY_LIMIT = int(os.getenv("NADO_MAKER_RETRY_LIMIT", "5"))
         self.NADO_MAKER_POLL_INTERVAL = float(os.getenv("NADO_MAKER_POLL_INTERVAL", "2.0"))
+        # GRVT-first XEMM 파라미터
+        self.GRVT_MAKER_TIMEOUT_SECONDS = int(os.getenv("GRVT_MAKER_TIMEOUT_SECONDS", "60"))
+        self.GRVT_MAKER_RETRY_LIMIT = int(os.getenv("GRVT_MAKER_RETRY_LIMIT", "5"))
+        self.GRVT_MAKER_POLL_INTERVAL_SEC = float(os.getenv("GRVT_MAKER_POLL_INTERVAL_SEC", "2.0"))
+        # NADO OI capacity 사전 체크 — 실측 OI vs max_oi에서 5% 버퍼 두고 양수 판정
+        self.NADO_OI_BUFFER_PCT = float(os.getenv("NADO_OI_BUFFER_PCT", "0.05"))
         self.MARGIN_BUFFER = 0.65  # 마진 버퍼 (유효마진의 65%, NADO account health 여유 확보)
         self.POLL_BALANCE_SECONDS = 300  # 잔고 폴링 (5분)
         self.POLL_FUNDING_SECONDS = 3600  # 펀딩 폴링 (1시간)
@@ -183,8 +191,9 @@ class Config:
         Returns:
             float: 예상 왕복 수수료 (USD)
         """
-        # XEMM 패턴: NADO maker(1bps) × 2 + GRVT taker(4.5bps) × 2 = 11bps round-trip
-        # 진입과 청산 각각 수수료 부과 (2×)
+        # XEMM 우선 경로: NADO maker(1bps) × 2 + GRVT maker rebate(-0.01bps) × 2 ≈ 2bps round-trip
+        # OI cap 미달 시 fallback (NADO maker → GRVT taker = 11bps) 사용 — 실측은
+        # GRVT cumulative_fee로 자동 보정되므로 estimate는 낙관적 기본값 사용.
         nado_fee = notional * 2 * (self.NADO_MAKER_FEE_BPS / 10_000)
-        grvt_fee = notional * 2 * (self.GRVT_TAKER_FEE_BPS / 10_000)
+        grvt_fee = notional * 2 * (self.GRVT_MAKER_FEE_BPS / 10_000)
         return nado_fee + grvt_fee

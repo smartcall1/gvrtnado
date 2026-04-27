@@ -638,61 +638,126 @@ class DeltaNeutralBot:
             grvt_qty = chunk_size / grvt_price
 
             slip = self.cfg.SLIPPAGE_PCT
-            grvt_order_price = grvt_price * (1 - slip) if grvt_side == "SELL" else grvt_price * (1 + slip)
+            nado_taker_price = nado_price * (1 + slip) if nado_side == "BUY" else nado_price * (1 - slip)
+            grvt_taker_price = grvt_price * (1 - slip) if grvt_side == "SELL" else grvt_price * (1 + slip)
 
             success = False
             nado_max_lev = self._nado.get_max_leverage(pair)
             nado_eff_lev = min(self.cfg.LEVERAGE, nado_max_lev)
+
+            # ── OI 사전 체크: 통과 시 GRVT-first(저비용), 미달 시 NADO-first(안전) ──
+            try:
+                cur_oi, max_oi, available = await self._nado.get_open_interest_capacity(pair)
+                # buffer 적용 — qty 대비 (1+buffer) 만큼 여유 있어야 통과
+                use_grvt_first = available >= nado_qty * (1.0 + self.cfg.NADO_OI_BUFFER_PCT)
+                if available != float("inf"):
+                    logger.info(
+                        f"NADO OI: cur={cur_oi:.4f} / max={max_oi:.4f} / avail={available:.4f} "
+                        f"(need {nado_qty:.4f}) → {'GRVT-first' if use_grvt_first else 'NADO-first fallback'}"
+                    )
+            except Exception as e:
+                logger.warning(f"OI capacity check error: {e}, using NADO-first fallback")
+                use_grvt_first = False
+
             for attempt in range(self.cfg.CHUNK_RETRY):
                 nado_margin = chunk_size / nado_eff_lev
 
-                # ── XEMM Step 1: NADO maker (post_only) — 노출 0초 보장 ──
-                # 미체결이면 노출 없이 cancel + retry. OI cap 거부도 자연 처리.
-                nado_ok, nado_filled, nado_filled_price, nado_err = await self._nado_open_with_xemm(
-                    pair, nado_side, nado_qty, nado_margin,
-                )
-
-                if not nado_ok:
-                    if nado_err == "nado_max_oi":
-                        nado_oi_fail = True
-                    elif nado_err == "nado_health":
-                        nado_health_fail = True
-                    logger.warning(f"Chunk {i+1}: NADO maker 실패 (err={nado_err or 'timeout'}), GRVT 미진입")
-                    if attempt < self.cfg.CHUNK_RETRY - 1:
-                        await asyncio.sleep(5)
-                    continue
-
-                # ── XEMM Step 2: NADO 체결 확인 → GRVT taker 즉시 ──
-                grvt_res = await self._grvt.place_limit_order(
-                    pair, grvt_side, grvt_qty, grvt_order_price,
-                )
-                grvt_ok = grvt_res.status in ("filled", "closed")
-
-                if grvt_ok:
-                    nado_filled_qty += nado_filled
-                    nado_filled_cost += nado_filled * nado_filled_price
-                    grvt_filled_qty += grvt_res.filled_size
-                    grvt_filled_cost += grvt_res.filled_size * grvt_res.filled_price
-                    success = True
-                    break
-
-                # 응급: NADO 방금 체결됐는데 GRVT 실패 → 즉시 NADO 롤백
-                logger.error(
-                    f"Chunk {i+1}: GRVT taker 실패 (status={grvt_res.status}, msg={grvt_res.message}) "
-                    f"→ NADO 응급 청산"
-                )
-                await self._telegram.send_alert(
-                    f"[🚨 GRVT FAIL] {pair} chunk {i+1} GRVT 미체결 → NADO 롤백 시도"
-                )
-                rollback_ok = await self._nado.close_position(
-                    pair, nado_pos_side, nado_filled, self.cfg.EMERGENCY_SLIPPAGE_PCT,
-                )
-                await self._grvt.cancel_all_orders(pair)
-                if not rollback_ok:
-                    logger.critical(f"Chunk {i+1}: NADO 롤백 실패")
-                    await self._telegram.send_alert(
-                        f"[🚨 ROLLBACK FAIL] NADO {pair} 단방향 잔존 가능 — 수동 확인"
+                if use_grvt_first:
+                    # ═══ Path A: GRVT maker → NADO taker (저비용 ~2bp round-trip) ═══
+                    grvt_ok, grvt_filled, grvt_filled_price = await self._grvt_open_with_xemm(
+                        pair, grvt_side, grvt_qty,
                     )
+                    if not grvt_ok:
+                        logger.warning(f"Chunk {i+1}: GRVT maker 실패 → 다음 attempt에서 NADO-first fallback")
+                        use_grvt_first = False
+                        if attempt < self.cfg.CHUNK_RETRY - 1:
+                            await asyncio.sleep(3)
+                        continue
+
+                    # GRVT 체결 → NADO taker 즉시
+                    nado_res = await self._nado.place_limit_order(
+                        pair, nado_side, nado_qty, nado_taker_price,
+                        isolated_margin=nado_margin,
+                    )
+                    nado_ok = nado_res.status in ("filled", "matched")
+
+                    if nado_ok:
+                        nado_filled_qty += nado_res.filled_size
+                        nado_filled_cost += nado_res.filled_size * nado_res.filled_price
+                        grvt_filled_qty += grvt_filled
+                        grvt_filled_cost += grvt_filled * grvt_filled_price
+                        success = True
+                        break
+
+                    # 응급: NADO 실패 → GRVT 롤백
+                    msg = nado_res.message or ""
+                    if "nado_max_oi" in msg:
+                        nado_oi_fail = True
+                    elif "nado_health" in msg:
+                        nado_health_fail = True
+                    logger.error(
+                        f"Chunk {i+1}: NADO taker 실패 ({msg}) → GRVT 응급 청산"
+                    )
+                    await self._telegram.send_alert(
+                        f"[🚨 NADO FAIL] {pair} chunk {i+1} → GRVT 롤백 시도"
+                    )
+                    rollback_ok = await self._grvt.close_position(
+                        pair, grvt_pos_side, grvt_filled, self.cfg.EMERGENCY_SLIPPAGE_PCT,
+                    )
+                    if not rollback_ok:
+                        logger.critical(f"Chunk {i+1}: GRVT 롤백 실패")
+                        await self._telegram.send_alert(
+                            f"[🚨 ROLLBACK FAIL] GRVT {pair} 단방향 잔존 — 수동 확인"
+                        )
+                    # 다음 attempt 시 fallback path 사용
+                    use_grvt_first = False
+
+                else:
+                    # ═══ Path B: NADO maker → GRVT taker (안전 fallback ~11bp round-trip) ═══
+                    nado_ok, nado_filled, nado_filled_price, nado_err = await self._nado_open_with_xemm(
+                        pair, nado_side, nado_qty, nado_margin,
+                    )
+
+                    if not nado_ok:
+                        if nado_err == "nado_max_oi":
+                            nado_oi_fail = True
+                        elif nado_err == "nado_health":
+                            nado_health_fail = True
+                        logger.warning(f"Chunk {i+1}: NADO maker 실패 (err={nado_err or 'timeout'})")
+                        if attempt < self.cfg.CHUNK_RETRY - 1:
+                            await asyncio.sleep(5)
+                        continue
+
+                    # NADO 체결 → GRVT taker
+                    grvt_res = await self._grvt.place_limit_order(
+                        pair, grvt_side, grvt_qty, grvt_taker_price,
+                    )
+                    grvt_ok = grvt_res.status in ("filled", "closed")
+
+                    if grvt_ok:
+                        nado_filled_qty += nado_filled
+                        nado_filled_cost += nado_filled * nado_filled_price
+                        grvt_filled_qty += grvt_res.filled_size
+                        grvt_filled_cost += grvt_res.filled_size * grvt_res.filled_price
+                        success = True
+                        break
+
+                    # 응급: GRVT 실패 → NADO 롤백
+                    logger.error(
+                        f"Chunk {i+1}: GRVT taker 실패 (status={grvt_res.status}) → NADO 응급 청산"
+                    )
+                    await self._telegram.send_alert(
+                        f"[🚨 GRVT FAIL] {pair} chunk {i+1} → NADO 롤백 시도"
+                    )
+                    rollback_ok = await self._nado.close_position(
+                        pair, nado_pos_side, nado_filled, self.cfg.EMERGENCY_SLIPPAGE_PCT,
+                    )
+                    await self._grvt.cancel_all_orders(pair)
+                    if not rollback_ok:
+                        logger.critical(f"Chunk {i+1}: NADO 롤백 실패")
+                        await self._telegram.send_alert(
+                            f"[🚨 ROLLBACK FAIL] NADO {pair} 단방향 잔존 — 수동 확인"
+                        )
 
                 if attempt < self.cfg.CHUNK_RETRY - 1:
                     await asyncio.sleep(5)
@@ -886,6 +951,107 @@ class DeltaNeutralBot:
             logger.error(f"NADO taker fallback failed: {e}")
         return False, 0.0, 0.0, ""
 
+    async def _grvt_open_with_xemm(
+        self, pair: str, side: str, qty: float,
+    ) -> tuple[bool, float, float]:
+        """GRVT maker 진입 — post_only + 1bp backoff retry + 최종 taker fallback.
+
+        Returns: (success, filled_qty, filled_price)
+        """
+        for attempt in range(self.cfg.GRVT_MAKER_RETRY_LIMIT):
+            try:
+                mark = await self._grvt.get_mark_price(pair)
+                if not mark or mark <= 0:
+                    await asyncio.sleep(2)
+                    continue
+
+                # 1bp, 2bp, 3bp, 4bp, 5bp backoff
+                offset = self.cfg.GRVT_MAKER_OFFSET_PCT * (attempt + 1)
+                maker_price = (
+                    mark * (1 + offset) if side.upper() == "SELL"
+                    else mark * (1 - offset)
+                )
+
+                poll_n = max(1, int(
+                    self.cfg.GRVT_MAKER_TIMEOUT_SECONDS / self.cfg.GRVT_MAKER_POLL_INTERVAL_SEC
+                ))
+                res = await self._grvt.place_limit_order(
+                    pair, side, qty, maker_price,
+                    post_only=True,
+                    poll_count=poll_n,
+                    poll_interval=self.cfg.GRVT_MAKER_POLL_INTERVAL_SEC,
+                )
+                if res.status in ("filled", "closed"):
+                    logger.info(
+                        f"GRVT maker fill (attempt {attempt+1}, qty {qty:.6f} @ {maker_price:.4f})"
+                    )
+                    return True, res.filled_size, res.filled_price
+
+                # 미체결 → cancel + 다음 시도
+                try:
+                    await self._grvt.cancel_all_orders(pair)
+                except Exception:
+                    pass
+                logger.info(
+                    f"GRVT maker miss, retry {attempt+1}/{self.cfg.GRVT_MAKER_RETRY_LIMIT} "
+                    f"(backoff {offset*10000:.1f}bp)"
+                )
+            except Exception as e:
+                logger.error(f"GRVT maker attempt {attempt+1} error: {e}")
+                await asyncio.sleep(2)
+
+        # All retries exhausted - taker fallback
+        logger.warning(f"GRVT maker all attempts failed, taker fallback")
+        try:
+            mark = await self._grvt.get_mark_price(pair)
+            if not mark:
+                return False, 0.0, 0.0
+            slip = self.cfg.SLIPPAGE_PCT
+            taker_price = mark * (1 - slip) if side.upper() == "SELL" else mark * (1 + slip)
+            res = await self._grvt.place_limit_order(pair, side, qty, taker_price)
+            if res.status in ("filled", "closed"):
+                return True, res.filled_size, res.filled_price
+        except Exception as e:
+            logger.error(f"GRVT taker fallback failed: {e}")
+        return False, 0.0, 0.0
+
+    async def _grvt_close_with_xemm(self, pair: str, side: str, qty: float) -> bool:
+        """GRVT maker 청산 — post_only + backoff retry + 최종 taker fallback.
+
+        side: 현재 포지션 방향 ("LONG"/"SHORT"). close_position 내부가 close_side 자동 결정.
+        """
+        for attempt in range(self.cfg.GRVT_MAKER_RETRY_LIMIT):
+            try:
+                offset = self.cfg.GRVT_MAKER_OFFSET_PCT * (attempt + 1)
+                ok = await self._grvt.close_position(
+                    pair, side, qty,
+                    slippage_pct=offset,  # maker-side offset
+                    post_only=True,
+                    poll_count=max(1, int(
+                        self.cfg.GRVT_MAKER_TIMEOUT_SECONDS / self.cfg.GRVT_MAKER_POLL_INTERVAL_SEC
+                    )),
+                    poll_interval=self.cfg.GRVT_MAKER_POLL_INTERVAL_SEC,
+                )
+                if ok:
+                    logger.info(f"GRVT close maker fill (attempt {attempt+1})")
+                    return True
+                try:
+                    await self._grvt.cancel_all_orders(pair)
+                except Exception:
+                    pass
+                logger.info(
+                    f"GRVT close maker timeout, retry {attempt+1}/{self.cfg.GRVT_MAKER_RETRY_LIMIT}"
+                )
+            except Exception as e:
+                logger.error(f"GRVT close maker attempt {attempt+1} error: {e}")
+                await asyncio.sleep(2)
+
+        # taker fallback
+        logger.warning(f"GRVT close maker all attempts failed, taker fallback")
+        return await self._grvt.close_position(
+            pair, side, qty, slippage_pct=self.cfg.SLIPPAGE_PCT,
+        )
+
     async def _nado_close_with_xemm(self, pair: str, side: str, qty: float) -> bool:
         """NADO maker 청산 — post_only + polling + backoff + taker fallback.
 
@@ -952,33 +1118,34 @@ class DeltaNeutralBot:
         grvt_total_size = abs(float(grvt_real[0].get("size", grvt_real[0].get("contracts", 0)))) if grvt_real else 0
 
         for i in range(chunks):
-            # ── XEMM 청산: NADO maker close → 체결 확인 → GRVT taker close ──
-            # 진입과 동일한 안전 패턴. NADO 미체결 시 노출 없음, NADO 체결 후 GRVT 즉시.
+            # ── XEMM 청산 (저비용): GRVT maker close → 체결 확인 → NADO taker close ──
+            # 청산은 OI cap 무관 (포지션을 줄이는 방향). 항상 저비용 경로 사용.
+            # GRVT maker rebate -0.01bp + NADO taker 1bp ≈ 1bp/leg. 진입과 합쳐 round-trip 약 2bp.
             nado_chunk_qty = nado_total_size / chunks if nado_pos and nado_total_size > 0 else 0
             grvt_chunk_qty = grvt_total_size / chunks if grvt_pos and grvt_total_size > 0 else 0
 
-            # Step 1: NADO maker close (실패 시 내부 taker fallback)
-            nado_done = True
-            if nado_pos and nado_chunk_qty > 0:
-                nado_done = await self._nado_close_with_xemm(
-                    pair, nado_pos.side, nado_chunk_qty,
-                )
-                if not nado_done:
-                    logger.warning(f"Exit chunk {i+1}: NADO maker+taker 모두 실패")
-
-            # Step 2: GRVT taker close — NADO 닫혔으면 즉시 헷지 회수
+            # Step 1: GRVT maker close (미체결 시 내부 taker fallback)
+            grvt_done = True
             if grvt_pos and grvt_chunk_qty > 0:
+                grvt_done = await self._grvt_close_with_xemm(
+                    pair, grvt_pos.side, grvt_chunk_qty,
+                )
+                if not grvt_done:
+                    logger.warning(f"Exit chunk {i+1}: GRVT maker+taker 모두 실패")
+
+            # Step 2: NADO taker close — GRVT 닫혔으면 즉시 헷지 회수
+            if nado_pos and nado_chunk_qty > 0:
                 try:
-                    grvt_done = await self._grvt.close_position(
-                        pair, grvt_pos.side, grvt_chunk_qty,
+                    nado_done = await self._nado.close_position(
+                        pair, nado_pos.side, nado_chunk_qty,
                         slippage_pct=self.cfg.SLIPPAGE_PCT,
                     )
-                    if not grvt_done:
+                    if not nado_done:
                         logger.warning(
-                            f"Exit chunk {i+1}: GRVT taker close 실패 — 다음 retry에서 처리"
+                            f"Exit chunk {i+1}: NADO close 실패 — 다음 retry에서 처리"
                         )
                 except Exception as e:
-                    logger.error(f"Exit chunk {i+1} GRVT close 예외: {e}")
+                    logger.error(f"Exit chunk {i+1} NADO close 예외: {e}")
 
             if i < chunks - 1:
                 await asyncio.sleep(self.cfg.CHUNK_WAIT)

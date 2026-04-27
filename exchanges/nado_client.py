@@ -94,6 +94,57 @@ class NadoClient(BaseExchangeClient):
         except Exception as e:
             logger.warning(f"Failed to load NADO increments: {e}")
 
+        # max_open_interest_x18 추가 캐시 — get_symbols에서 가져옴 (PerpProduct에는 없음)
+        try:
+            pids = list(self._symbol_map.values())
+            if not pids:
+                return
+            symbols_data = await asyncio.to_thread(
+                self._client.context.engine_client.get_symbols,
+                product_type="perp", product_ids=pids,
+            )
+            if symbols_data and hasattr(symbols_data, "symbols"):
+                count_with_cap = 0
+                for _key, s in symbols_data.symbols.items():
+                    pid = int(s.product_id)
+                    if pid not in self._increments:
+                        continue
+                    if s.max_open_interest_x18:
+                        max_oi = int(s.max_open_interest_x18) / 1e18
+                        self._increments[pid]["max_oi"] = max_oi
+                        count_with_cap += 1
+                logger.info(f"NADO max_oi cached for {count_with_cap}/{len(self._increments)} products")
+        except Exception as e:
+            logger.warning(f"Failed to cache NADO max_oi: {e}")
+
+    async def get_open_interest_capacity(self, symbol: str) -> tuple[float, float, float]:
+        """현재 OI, 최대 OI, 가용 capacity (코인 수량 단위) 반환.
+
+        - max_oi가 캐시에 없거나 0이면 (-1, -1, inf) — cap 무제한으로 간주
+        - 조회 실패 시 (-1, max_oi, 0) — 안전 차단 (사전 진입 시도 안 함)
+        """
+        pid = self._symbol_map.get(symbol.upper())
+        if pid is None:
+            return (-1.0, -1.0, 0.0)
+
+        max_oi = self._increments.get(pid, {}).get("max_oi")
+        if not max_oi or max_oi <= 0:
+            return (-1.0, -1.0, float("inf"))  # cap 정보 없음 → 무제한 가정
+
+        try:
+            products = await asyncio.to_thread(self._client.market.get_all_engine_markets)
+            if products and hasattr(products, "perp_products"):
+                for p in products.perp_products:
+                    if p.product_id != pid:
+                        continue
+                    if p.state and p.state.open_interest:
+                        current_oi = int(p.state.open_interest) / 1e18
+                        available = max(0.0, max_oi - current_oi)
+                        return (current_oi, max_oi, available)
+        except Exception as e:
+            logger.error(f"NADO get_open_interest_capacity({symbol}): {e}")
+        return (-1.0, max_oi, 0.0)
+
     def get_max_leverage(self, symbol: str) -> float:
         pid = self._symbol_map.get(symbol.upper())
         if pid and pid in self._increments:
