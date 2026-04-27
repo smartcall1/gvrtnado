@@ -87,19 +87,9 @@ class Config:
         self.CHUNK_WAIT = 30  # 청크 간 대기 시간 (초)
         self.SLIPPAGE_PCT = 0.004  # 0.4% 슬리피지 (taker fallback 가격)
         self.EMERGENCY_SLIPPAGE_PCT = 0.01  # 긴급 상황 1% 슬리피지
+        # ===== XEMM 패턴 — GRVT maker → NADO taker (round-trip 약 2bp) =====
+        # OI cap 사전 체크 통과한 페어만 진입. 미달 페어는 _oi_blocked 등록 후 다음 페어로.
         self.GRVT_MAKER_OFFSET_PCT = float(os.getenv("GRVT_MAKER_OFFSET_PCT", "0.0001"))  # 시작 backoff 1bp
-        self.GRVT_MAKER_POLL_COUNT = 2  # (legacy) GRVT close_position 내장 폴링용 — XEMM 외 경로
-        self.GRVT_MAKER_POLL_INTERVAL = 1.5
-        # ===== XEMM 패턴 — 두 갈래 =====
-        # 우선: GRVT maker(rebate -0.01bps) → NADO taker(1bps) — round-trip 약 2bps
-        #       (NADO OI capacity 사전 체크 통과 시 사용)
-        # Fallback: NADO maker(1bps) → GRVT taker(4.5bps) — round-trip 약 11bps
-        #          (OI cap 부족하거나 GRVT maker miss 시)
-        self.NADO_MAKER_OFFSET_PCT = float(os.getenv("NADO_MAKER_OFFSET_PCT", "0.0001"))
-        self.NADO_MAKER_TIMEOUT_SECONDS = int(os.getenv("NADO_MAKER_TIMEOUT_SECONDS", "60"))
-        self.NADO_MAKER_RETRY_LIMIT = int(os.getenv("NADO_MAKER_RETRY_LIMIT", "5"))
-        self.NADO_MAKER_POLL_INTERVAL = float(os.getenv("NADO_MAKER_POLL_INTERVAL", "2.0"))
-        # GRVT-first XEMM 파라미터
         self.GRVT_MAKER_TIMEOUT_SECONDS = int(os.getenv("GRVT_MAKER_TIMEOUT_SECONDS", "60"))
         self.GRVT_MAKER_RETRY_LIMIT = int(os.getenv("GRVT_MAKER_RETRY_LIMIT", "5"))
         self.GRVT_MAKER_POLL_INTERVAL_SEC = float(os.getenv("GRVT_MAKER_POLL_INTERVAL_SEC", "2.0"))
