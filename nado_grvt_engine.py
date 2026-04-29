@@ -58,7 +58,7 @@ class DeltaNeutralBot:
                     self._positions[k] = Position.from_dict(v)
                 except Exception as e:
                     logger.warning(f"Position deserialization failed for {k}: {e}")
-            if not self._positions and self._state.cycle_state in (CycleState.HOLD, CycleState.EXIT):
+            if not self._positions and self._state.cycle_state in (CycleState.HOLD, CycleState.EXIT, CycleState.HOLD_SUSPENDED):
                 logger.warning("Position restore failed, will rely on recovery check")
                 self._state.positions = {}
         self._earn = self._init_earn()
@@ -75,6 +75,9 @@ class DeltaNeutralBot:
         self._enter_since: float = 0.0
         self._oi_blocked: dict[str, float] = {}  # pair → unblock_at timestamp
         self._last_topup_attempt: float = 0.0
+        # HOLD_SUSPENDED 상태 추적 (API 장애 시 포지션 유지 대기)
+        self._suspended_since: float = 0.0
+        self._suspended_alerted: bool = False
 
     def _init_earn(self) -> EarnState:
         if self._state.earn:
@@ -116,6 +119,8 @@ class DeltaNeutralBot:
             await self._handle_enter()
         elif state == CycleState.HOLD:
             await self._handle_hold()
+        elif state == CycleState.HOLD_SUSPENDED:
+            await self._handle_hold_suspended()
         elif state == CycleState.EXIT:
             await self._handle_exit()
         elif state == CycleState.COOLDOWN:
@@ -347,8 +352,19 @@ class DeltaNeutralBot:
             self._cb.record_failure("grvt")
 
         if self._cb.any_tripped():
-            logger.critical("Circuit Breaker tripped!")
-            await self._emergency_exit("circuit_breaker")
+            tripped_exchanges = [ex for ex in self._cb._fails if self._cb.is_tripped(ex)]
+            logger.warning(
+                f"Circuit Breaker tripped ({'+'.join(tripped_exchanges)}) — "
+                f"HOLD_SUSPENDED 전환 (양빵 헷지라 포지션 유지, API 복구 대기)"
+            )
+            self._suspended_since = time.time()
+            self._suspended_alerted = False
+            self._state.cycle_state = CycleState.HOLD_SUSPENDED
+            self._save_state()
+            await self._telegram.send_alert(
+                f"[⚠️ API 장애] {'+'.join(tripped_exchanges)} 응답 없음\n"
+                f"포지션 유지, API 복구 대기 중..."
+            )
             return
 
         if self._nado_price and self._grvt_price:
@@ -587,6 +603,67 @@ class DeltaNeutralBot:
         await self._telegram.send_alert(
             f"[TOPUP] {pair} ${avg_notional:.0f}→${new_avg:.0f} / 목표${target:.0f}"
         )
+
+    async def _handle_hold_suspended(self):
+        """API 장애로 일시 중단 — 포지션 유지, API 복구 대기.
+
+        양빵 헷지 포지션은 한쪽 API 장애에도 당장 위험하지 않음.
+        주기적으로 양쪽 API를 핑하여 복구 여부를 확인.
+        - 복구되면: CB 초기화 + HOLD 복귀
+        - 5분 미복구: 텔레그램 상세 알림
+        - 30분 미복구: MANUAL_INTERVENTION 전환
+        """
+        pair = self._state.pair
+        elapsed = time.time() - self._suspended_since
+
+        # 양쪽 API 핑
+        nado_ok = await self._nado.get_mark_price(pair) is not None
+        grvt_ok = await self._grvt.get_mark_price(pair) is not None
+
+        if nado_ok:
+            self._cb.record_success("nado")
+        if grvt_ok:
+            self._cb.record_success("grvt")
+
+        # 양쪽 다 복구되면 HOLD 복귀
+        if nado_ok and grvt_ok and not self._cb.any_tripped():
+            logger.info(
+                f"API 복구 감지 (중단 {elapsed:.0f}초) — HOLD 복귀"
+            )
+            self._state.cycle_state = CycleState.HOLD
+            self._save_state()
+            await self._telegram.send_alert(
+                f"[✅ API 복구] {pair} HOLD 복귀 (중단 {elapsed:.0f}초)"
+            )
+            return
+
+        # 30분 이상 미복구 → MANUAL_INTERVENTION
+        if elapsed >= self.cfg.SUSPENDED_MANUAL_SECONDS:
+            logger.critical(
+                f"API {elapsed:.0f}초({elapsed/60:.0f}분) 미복구 — MANUAL_INTERVENTION 전환"
+            )
+            self._state.cycle_state = CycleState.MANUAL_INTERVENTION
+            self._state.exit_reason = "api_prolonged_outage"
+            self._save_state()
+            await self._telegram.send_alert(
+                f"[🚨 장기 장애] {pair} API {elapsed/60:.0f}분 미복구\n"
+                f"MANUAL_INTERVENTION 전환 — 수동 확인 필요\n"
+                f"NADO: {'✅' if nado_ok else '❌'} / GRVT: {'✅' if grvt_ok else '❌'}"
+            )
+            return
+
+        # 5분 이상 미복구 → 알림 (1회만)
+        if not self._suspended_alerted and elapsed >= self.cfg.SUSPENDED_ALERT_SECONDS:
+            self._suspended_alerted = True
+            logger.warning(
+                f"API 장애 {elapsed:.0f}초 지속 — NADO:{'OK' if nado_ok else 'DOWN'} "
+                f"GRVT:{'OK' if grvt_ok else 'DOWN'}"
+            )
+            await self._telegram.send_alert(
+                f"[⚠️ 장애 지속] {pair} API {elapsed/60:.0f}분째 미복구\n"
+                f"NADO: {'✅' if nado_ok else '❌'} / GRVT: {'✅' if grvt_ok else '❌'}\n"
+                f"포지션 유지 중, {self.cfg.SUSPENDED_MANUAL_SECONDS//60}분 후 MANUAL 전환"
+            )
 
     async def _handle_exit(self):
         pair = self._state.pair
@@ -1306,14 +1383,33 @@ class DeltaNeutralBot:
             nado_curr = await self._nado.get_mark_price(pair) or self._nado_price or 0
             grvt_curr = await self._grvt.get_mark_price(pair) or self._grvt_price or 0
 
-            def _live_size(positions, price):
+            def _live_size(positions):
                 if not positions:
-                    return 0, 0.0
-                size = abs(float(positions[0].get("size", positions[0].get("amount", positions[0].get("contracts", 0)))))
-                return size, size * price
+                    return 0
+                return abs(float(positions[0].get("size", positions[0].get("amount", positions[0].get("contracts", 0)))))
 
-            nado_size, nado_notional = _live_size(nado_remaining, nado_curr)
-            grvt_size, grvt_notional = _live_size(grvt_remaining, grvt_curr)
+            nado_size = _live_size(nado_remaining)
+            grvt_size = _live_size(grvt_remaining)
+
+            # Cycle 13 방어: 포지션이 존재하는데(size>0) mark price=0이면
+            # "dust"가 아니라 "가격 조회 실패"임. 이 상태에서 dust 판정하면
+            # notional=size*0=$0 → 거짓 dust → 한쪽만 청산되는 치명적 버그.
+            nado_price_failed = nado_remaining and nado_size > 0 and nado_curr == 0
+            grvt_price_failed = grvt_remaining and grvt_size > 0 and grvt_curr == 0
+            if nado_price_failed or grvt_price_failed:
+                failed = []
+                if nado_price_failed:
+                    failed.append("NADO")
+                if grvt_price_failed:
+                    failed.append("GRVT")
+                logger.critical(
+                    f"Exit dust check: {'+'.join(failed)} mark price=0 (API 장애) "
+                    f"— nado_size={nado_size} grvt_size={grvt_size}, 거짓 dust 방지를 위해 청산 실패 처리"
+                )
+                return False
+
+            nado_notional = nado_size * nado_curr
+            grvt_notional = grvt_size * grvt_curr
 
             nado_dust = nado_notional < DUST_NOTIONAL_USD
             grvt_dust = grvt_notional < DUST_NOTIONAL_USD
@@ -1327,12 +1423,30 @@ class DeltaNeutralBot:
                 return True
 
             logger.warning(f"Exit retry {attempt+1}/3: nado=${nado_notional:.2f}({nado_size}) grvt=${grvt_notional:.2f}({grvt_size})")
-            if nado_remaining and not nado_dust:
+
+            nado_needs_close = nado_remaining and not nado_dust
+            grvt_needs_close = grvt_remaining and not grvt_dust
+
+            # 편측 노출 방지: 한쪽만 남아있으면 단독 close 금지 → 실패 반환
+            if nado_needs_close and not grvt_needs_close and not grvt_remaining:
+                logger.critical(f"Exit retry {attempt+1}: NADO만 잔존(${nado_notional:.2f}), GRVT 없음 → 편측 close 금지")
+                return False
+            if grvt_needs_close and not nado_needs_close and not nado_remaining:
+                logger.critical(f"Exit retry {attempt+1}: GRVT만 잔존(${grvt_notional:.2f}), NADO 없음 → 편측 close 금지")
+                return False
+
+            # 원자적 순서 보장: GRVT close 먼저 → 성공해야 NADO close
+            # (GRVT API 장애 시 NADO만 닫히는 편측 노출 방지)
+            grvt_close_ok = True
+            if grvt_needs_close:
+                side = (grvt_remaining[0].get("side") or "LONG").upper()
+                grvt_close_ok = await self._grvt.close_position(pair, side, grvt_size, self.cfg.EMERGENCY_SLIPPAGE_PCT)
+                if not grvt_close_ok:
+                    logger.warning(f"Exit retry {attempt+1}: GRVT close 실패 → NADO close 보류 (편측 방지)")
+                    continue  # GRVT 실패면 NADO 건드리지 않고 다음 retry
+            if nado_needs_close:
                 side = (nado_remaining[0].get("side") or "LONG").upper()
                 await self._nado.close_position(pair, side, nado_size, self.cfg.EMERGENCY_SLIPPAGE_PCT)
-            if grvt_remaining and not grvt_dust:
-                side = (grvt_remaining[0].get("side") or "LONG").upper()
-                await self._grvt.close_position(pair, side, grvt_size, self.cfg.EMERGENCY_SLIPPAGE_PCT)
         return False
 
     async def _emergency_exit(self, reason: str):
@@ -1776,6 +1890,11 @@ class DeltaNeutralBot:
         )
 
         await self._recovery_check()
+
+        # 봇 재시작 시 HOLD_SUSPENDED 상태면 타이머 재설정 (0이면 즉시 타임아웃 됨)
+        if self._state.cycle_state == CycleState.HOLD_SUSPENDED and self._suspended_since == 0:
+            self._suspended_since = time.time()
+            logger.info("HOLD_SUSPENDED 상태에서 재시작 — suspended 타이머 리셋")
 
         self._last_status_log = 0.0
         try:

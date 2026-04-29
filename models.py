@@ -14,6 +14,10 @@ class CycleState(Enum):
     HOLD = "HOLD"
     EXIT = "EXIT"
     COOLDOWN = "COOLDOWN"
+    # API 장애(503 등) 감지 시 포지션 유지하며 API 복구 대기.
+    # 양빵 헷지 포지션은 한쪽 API 장애에도 당장 위험하지 않음.
+    # 복구 시 HOLD 자동 복귀, 장기 미복구 시 MANUAL_INTERVENTION 전환.
+    HOLD_SUSPENDED = "HOLD_SUSPENDED"
     # _emergency_exit 실패 시 진입 — 잔여 포지션 위에 신규 진입 차단.
     # 사용자가 양쪽 거래소 수동 청산하면 _handle_manual_intervention이 자동 IDLE 복귀.
     MANUAL_INTERVENTION = "MANUAL_INTERVENTION"

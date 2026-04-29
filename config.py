@@ -66,6 +66,9 @@ class Config:
         self.MARGIN_WARNING_PCT = float(os.getenv("MARGIN_WARNING_PCT", "15"))
         self.MARGIN_EMERGENCY_PCT = float(os.getenv("MARGIN_EMERGENCY_PCT", "10"))
         self.CIRCUIT_BREAKER_FAILS = int(os.getenv("CIRCUIT_BREAKER_FAILS", "5"))
+        # HOLD_SUSPENDED: API 장애 시 포지션 유지하며 대기 (양빵 헷지라 당장 위험 없음)
+        self.SUSPENDED_ALERT_SECONDS = int(os.getenv("SUSPENDED_ALERT_SECONDS", "300"))  # 5분 후 텔레그램 알림
+        self.SUSPENDED_MANUAL_SECONDS = int(os.getenv("SUSPENDED_MANUAL_SECONDS", "1800"))  # 30분 후 MANUAL 전환
         self.PRICE_DIVERGENCE_WARN = float(os.getenv("PRICE_DIVERGENCE_WARN", "3"))
         self.PRICE_DIVERGENCE_EMERGENCY = float(
             os.getenv("PRICE_DIVERGENCE_EMERGENCY", "5")
