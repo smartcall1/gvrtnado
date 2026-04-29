@@ -209,7 +209,7 @@ class GrvtClient(BaseExchangeClient):
     async def get_bbo(self, symbol: str) -> dict:
         try:
             grvt_sym = self._grvt_symbol(symbol)
-            book = await self._retry(self._api.fetch_order_book, grvt_sym, 1)
+            book = await self._retry(self._api.fetch_order_book, grvt_sym, 5)
             if isinstance(book, dict):
                 bids = book.get("bids", [])
                 asks = book.get("asks", [])
