@@ -241,6 +241,20 @@ class NadoClient(BaseExchangeClient):
             logger.error(f"NADO get_mark_price: {e}")
         return None
 
+    async def get_bbo(self, symbol: str) -> dict:
+        try:
+            product_id = self._product_id(symbol)
+            data = await asyncio.to_thread(
+                self._client.market.get_latest_market_price, product_id
+            )
+            if data:
+                bid = int(data.bid_x18) / 1e18
+                ask = int(data.ask_x18) / 1e18
+                return {"bid": bid, "ask": ask, "mark": (bid + ask) / 2}
+        except Exception as e:
+            logger.error(f"NADO get_bbo: {e}")
+        return {"bid": 0.0, "ask": 0.0, "mark": 0.0}
+
     async def get_funding_rate(self, symbol: str) -> Optional[float]:
         # IndexerFundingRateData: funding_rate_x18 (x18 string)
         try:

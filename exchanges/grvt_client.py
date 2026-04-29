@@ -206,6 +206,20 @@ class GrvtClient(BaseExchangeClient):
             logger.error(f"GRVT get_mark_price: {e}")
         return None
 
+    async def get_bbo(self, symbol: str) -> dict:
+        try:
+            grvt_sym = self._grvt_symbol(symbol)
+            ticker = await self._retry(self._api.fetch_ticker, grvt_sym)
+            if ticker:
+                return {
+                    "bid": float(ticker.get("bid", 0) or 0),
+                    "ask": float(ticker.get("ask", 0) or 0),
+                    "mark": float(ticker.get("mark_price", ticker.get("last_price", 0))),
+                }
+        except Exception as e:
+            logger.error(f"GRVT get_bbo: {e}")
+        return {"bid": 0.0, "ask": 0.0, "mark": 0.0}
+
     async def get_funding_rate(self, symbol: str) -> Optional[float]:
         """
         Returns 8h-normalized decimal funding rate.

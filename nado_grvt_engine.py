@@ -899,22 +899,37 @@ class DeltaNeutralBot:
                 break
 
             try:
-                mark = await self._grvt.get_mark_price(pair)
+                bbo = await self._grvt.get_bbo(pair)
+                bbo_bid, bbo_ask, mark = bbo["bid"], bbo["ask"], bbo["mark"]
                 if not mark or mark <= 0:
                     await asyncio.sleep(2)
                     continue
 
-                # 1bp, 2bp, 3bp, 4bp, 5bp backoff
-                offset = self.cfg.GRVT_MAKER_OFFSET_PCT * (attempt + 1)
-                maker_price = (
-                    mark * (1 + offset) if side.upper() == "SELL"
-                    else mark * (1 - offset)
+                # BBO 기반 가격 산출 — bid/ask 큐 최전방 진입
+                if bbo_bid > 0 and bbo_ask > 0:
+                    if side.upper() == "SELL":
+                        maker_price = bbo_ask - 0.01 * attempt
+                        if maker_price <= bbo_bid:
+                            maker_price = bbo_bid + 0.01
+                    else:
+                        maker_price = bbo_bid + 0.01 * attempt
+                        if maker_price >= bbo_ask:
+                            maker_price = bbo_ask - 0.01
+                else:
+                    offset = self.cfg.GRVT_MAKER_OFFSET_PCT * (attempt + 1)
+                    maker_price = (
+                        mark * (1 + offset) if side.upper() == "SELL"
+                        else mark * (1 - offset)
+                    )
+
+                logger.info(
+                    f"GRVT maker 가격: {maker_price:.4f} (bid={bbo_bid:.2f} ask={bbo_ask:.2f} "
+                    f"spread=${bbo_ask - bbo_bid:.2f}, 시도 {attempt+1})"
                 )
 
                 poll_n = max(1, int(
                     self.cfg.GRVT_MAKER_TIMEOUT_SECONDS / self.cfg.GRVT_MAKER_POLL_INTERVAL_SEC
                 ))
-                # 잔량(remaining) 만 새로 발주 — 이전 시도 부분 체결분은 누적
                 res = await self._grvt.place_limit_order(
                     pair, side, remaining, maker_price,
                     post_only=True,
@@ -930,7 +945,6 @@ class DeltaNeutralBot:
                         f"(누적 {total_filled:.6f}/{qty:.6f})"
                     )
 
-                # 명시적 cancel — SDK가 partial fill 시 cancel 안 했을 수 있음 (책 잔존 차단)
                 try:
                     await self._grvt.cancel_all_orders(pair)
                 except Exception:
@@ -942,7 +956,7 @@ class DeltaNeutralBot:
 
                 logger.info(
                     f"GRVT maker 부족, retry {attempt+1}/{self.cfg.GRVT_MAKER_RETRY_LIMIT} "
-                    f"(누적 {total_filled:.6f}/{qty:.6f}, backoff {offset*10000:.1f}bp)"
+                    f"(누적 {total_filled:.6f}/{qty:.6f})"
                 )
             except Exception as e:
                 logger.error(f"GRVT maker attempt {attempt+1} error: {e}")
@@ -1010,8 +1024,28 @@ class DeltaNeutralBot:
                     )
                     return True
 
-                offset = self.cfg.GRVT_MAKER_OFFSET_PCT * (attempt + 1)
-                # 잔량(remaining) 만 새로 발주
+                # BBO 기반 slippage 산출 — mark 대비 bid/ask 도달 offset 역산
+                bbo = await self._grvt.get_bbo(pair)
+                bbo_bid, bbo_ask, mark = bbo["bid"], bbo["ask"], bbo["mark"]
+                if bbo_bid > 0 and bbo_ask > 0 and mark > 0:
+                    if side.upper() == "LONG":
+                        # SELL: post_only → mark*(1+pct), 목표 = best_ask
+                        target = bbo_ask - 0.01 * attempt
+                        if target <= bbo_bid:
+                            target = bbo_bid + 0.01
+                        offset = max(0.0001, (target / mark) - 1)
+                    else:
+                        # BUY: post_only → mark*(1-pct), 목표 = best_bid
+                        target = bbo_bid + 0.01 * attempt
+                        if target >= bbo_ask:
+                            target = bbo_ask - 0.01
+                        offset = max(0.0001, 1 - (target / mark))
+                    logger.info(
+                        f"GRVT close maker 가격: target={target:.4f} (bid={bbo_bid:.2f} ask={bbo_ask:.2f}, 시도 {attempt+1})"
+                    )
+                else:
+                    offset = self.cfg.GRVT_MAKER_OFFSET_PCT * (attempt + 1)
+
                 await self._grvt.close_position(
                     pair, side, remaining,
                     slippage_pct=offset,
