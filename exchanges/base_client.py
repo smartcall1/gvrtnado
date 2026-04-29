@@ -30,6 +30,11 @@ class BaseExchangeClient(ABC):
     async def get_positions(self, symbol: str) -> list[dict]:
         """Open positions for symbol. Each dict has: side, size, entry_price."""
 
+    async def get_positions_strict(self, symbol: str) -> Optional[list[dict]]:
+        """Strict: returns None on API failure, [] only for genuine empty.
+        Override in subclasses. Default delegates to get_positions()."""
+        return await self.get_positions(symbol)
+
     @abstractmethod
     async def get_mark_price(self, symbol: str) -> Optional[float]:
         """Current mark price."""

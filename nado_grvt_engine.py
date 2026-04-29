@@ -597,11 +597,17 @@ class DeltaNeutralBot:
         30분마다 reminder 알림.
         """
         pair = self._state.pair
-        try:
-            nado_pos = await self._nado.get_positions(pair)
-            grvt_pos = await self._grvt.get_positions(pair)
-        except Exception as e:
-            logger.warning(f"MANUAL: 포지션 조회 실패 (계속 대기): {e}")
+        nado_pos = await self._nado.get_positions_strict(pair)
+        grvt_pos = await self._grvt.get_positions_strict(pair)
+
+        # Cycle 12 방어: API 실패(None)를 "포지션 없음"으로 착각하여 조기 IDLE 복귀 방지.
+        if nado_pos is None or grvt_pos is None:
+            failed = []
+            if nado_pos is None:
+                failed.append("NADO")
+            if grvt_pos is None:
+                failed.append("GRVT")
+            logger.warning(f"MANUAL: {'+'.join(failed)} 포지션 조회 실패 (API unresponsive) — 계속 대기")
             return
 
         nado_size = abs(float(nado_pos[0].get("size", nado_pos[0].get("amount", 0)))) if nado_pos else 0
@@ -1081,9 +1087,18 @@ class DeltaNeutralBot:
             #
             # Bug C 방어 (2026-04-27): 매 청크 시작 시 거래소에서 직접 잔량 재조회.
             # 이전 청크 부분 체결분이 자동 차감되어 다음 청크 qty 정확히 산정됨.
+            #
+            # Cycle 12 방어 (2026-04-29): strict 조회로 API 실패 시 None 반환 → 안전 중단.
+            # 기존: API 503 → except → [] → 잔량 0 판정 → 한쪽만 청산 후 dust로 완료 처리.
             chunks_left = chunks - i
-            nado_real = await self._nado.get_positions(pair)
-            grvt_real = await self._grvt.get_positions(pair)
+            nado_real = await self._nado.get_positions_strict(pair)
+            grvt_real = await self._grvt.get_positions_strict(pair)
+
+            if nado_real is None or grvt_real is None:
+                failed_side = "NADO" if nado_real is None else "GRVT"
+                logger.warning(f"Exit chunk {i+1}: {failed_side} 포지션 조회 실패 (API unresponsive) — ��크 중단")
+                break
+
             nado_remaining = abs(float(nado_real[0].get("size", nado_real[0].get("amount", 0)))) if nado_real else 0
             grvt_remaining = abs(float(grvt_real[0].get("size", grvt_real[0].get("contracts", 0)))) if grvt_real else 0
 
@@ -1105,8 +1120,11 @@ class DeltaNeutralBot:
                 if not grvt_done:
                     logger.warning(f"Exit chunk {i+1}: GRVT maker+taker 모두 실패")
 
-            # Step 2: NADO taker close — GRVT 닫혔으면 즉시 헷지 회수
-            if nado_pos and nado_chunk_qty > 0:
+            # Step 2: NADO taker close — GRVT 닫혔을 때만 헷지 회수.
+            # Cycle 12 방어: GRVT 실패 시 NADO를 먼저 청산하면 편측 노출 발생.
+            if not grvt_done:
+                logger.warning(f"Exit chunk {i+1}: GRVT 미청산 → NADO 청산 보류 (편측 노출 방지)")
+            elif nado_pos and nado_chunk_qty > 0:
                 try:
                     nado_done = await self._nado.close_position(
                         pair, nado_pos.side, nado_chunk_qty,
@@ -1128,8 +1146,23 @@ class DeltaNeutralBot:
 
         for attempt in range(3):
             await asyncio.sleep(5)
-            nado_remaining = await self._nado.get_positions(pair)
-            grvt_remaining = await self._grvt.get_positions(pair)
+            nado_remaining = await self._nado.get_positions_strict(pair)
+            grvt_remaining = await self._grvt.get_positions_strict(pair)
+
+            # Cycle 12 방어: API 실패(None)를 "포지션 없음"으로 취급하면
+            # 한쪽만 청산 후 "양쪽 다 dust" 거짓 판정 → 미청산 직선 노출.
+            # None이면 즉시 실패 반환 → _emergency_exit가 MANUAL_INTERVENTION 전환.
+            if nado_remaining is None or grvt_remaining is None:
+                failed = []
+                if nado_remaining is None:
+                    failed.append("NADO")
+                if grvt_remaining is None:
+                    failed.append("GRVT")
+                logger.critical(
+                    f"Exit dust check: {'+'.join(failed)} 포지션 조회 실패 (API unresponsive) "
+                    f"— 거짓 빈 배열 방지를 위해 청산 실패 처리"
+                )
+                return False
 
             nado_curr = await self._nado.get_mark_price(pair) or self._nado_price or 0
             grvt_curr = await self._grvt.get_mark_price(pair) or self._grvt_price or 0
@@ -1223,8 +1256,17 @@ class DeltaNeutralBot:
         if self._state.cycle_state not in (CycleState.HOLD, CycleState.ENTER, CycleState.EXIT):
             return
 
-        nado_pos = await self._nado.get_positions(pair)
-        grvt_pos = await self._grvt.get_positions(pair)
+        nado_pos = await self._nado.get_positions_strict(pair)
+        grvt_pos = await self._grvt.get_positions_strict(pair)
+
+        if nado_pos is None or grvt_pos is None:
+            failed = []
+            if nado_pos is None:
+                failed.append("NADO")
+            if grvt_pos is None:
+                failed.append("GRVT")
+            logger.warning(f"Recovery: {'+'.join(failed)} 포지션 조회 실패 — 복구 건너뜀")
+            return
 
         if nado_pos and grvt_pos:
             np = nado_pos[0]

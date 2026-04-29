@@ -145,6 +145,25 @@ class GrvtClient(BaseExchangeClient):
             logger.warning(f"GRVT get_cumulative_fees: {e}")
             return 0.0
 
+    def _parse_positions(self, result: list) -> list[dict]:
+        positions = []
+        for p in result:
+            size_raw = p.get("size", p.get("contracts", p.get("contractSize", 0)))
+            size_signed = float(size_raw) if size_raw not in (None, "") else 0.0
+            if abs(size_signed) <= 0:
+                continue
+            side = (p.get("side") or "").upper()
+            if not side:
+                side = "LONG" if size_signed > 0 else "SHORT"
+            entry = p.get("entry_price", p.get("entryPrice", 0))
+            positions.append({
+                "side": side,
+                "size": abs(size_signed),
+                "entry_price": float(entry) if entry not in (None, "") else 0.0,
+                "notional": abs(float(p.get("notional", 0) or 0)),
+            })
+        return positions
+
     async def get_positions(self, symbol: str) -> list[dict]:
         # GRVT raw response uses 'size' (signed), 'entry_price', 'notional' — NOT
         # CCXT-translated 'contracts'/'entryPrice'. Parse raw fields with CCXT fallback.
@@ -153,26 +172,22 @@ class GrvtClient(BaseExchangeClient):
             result = await self._retry(self._api.fetch_positions, [grvt_sym])
             if not result:
                 return []
-            positions = []
-            for p in result:
-                size_raw = p.get("size", p.get("contracts", p.get("contractSize", 0)))
-                size_signed = float(size_raw) if size_raw not in (None, "") else 0.0
-                if abs(size_signed) <= 0:
-                    continue
-                side = (p.get("side") or "").upper()
-                if not side:
-                    side = "LONG" if size_signed > 0 else "SHORT"
-                entry = p.get("entry_price", p.get("entryPrice", 0))
-                positions.append({
-                    "side": side,
-                    "size": abs(size_signed),
-                    "entry_price": float(entry) if entry not in (None, "") else 0.0,
-                    "notional": abs(float(p.get("notional", 0) or 0)),
-                })
-            return positions
+            return self._parse_positions(result)
         except Exception as e:
             logger.error(f"GRVT get_positions: {e}")
         return []
+
+    async def get_positions_strict(self, symbol: str) -> Optional[list[dict]]:
+        """None = API failure, [] = genuine empty."""
+        try:
+            grvt_sym = self._grvt_symbol(symbol)
+            result = await self._retry(self._api.fetch_positions, [grvt_sym])
+            if not result:
+                return []
+            return self._parse_positions(result)
+        except Exception as e:
+            logger.error(f"GRVT get_positions_strict FAILED (returning None): {e}")
+            return None
 
     async def get_mark_price(self, symbol: str) -> Optional[float]:
         cached = self._ws_prices.get(symbol)

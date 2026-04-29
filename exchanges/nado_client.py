@@ -173,6 +173,30 @@ class NadoClient(BaseExchangeClient):
             logger.error(f"NADO get_balance: {e}")
         return 0.0
 
+    def _parse_positions(self, info, product_id: int) -> list[dict]:
+        positions = []
+        for pb in info.perp_balances:
+            if pb.product_id != product_id:
+                continue
+            amount = int(pb.balance.amount) / 1e18
+            if abs(amount) > 0:
+                entry_price = 0.0
+                try:
+                    vqb = getattr(pb.balance, 'v_quote_balance', None)
+                    if vqb is None:
+                        vqb = getattr(pb.balance, 'vQuoteBalance', None)
+                    if vqb is not None and abs(amount) > 0:
+                        entry_price = abs(int(vqb) / 1e18 / amount)
+                except Exception:
+                    pass
+                positions.append({
+                    "side": "LONG" if amount > 0 else "SHORT",
+                    "size": abs(amount),
+                    "entry_price": entry_price,
+                    "notional": abs(amount) * entry_price if entry_price > 0 else 0,
+                })
+        return positions
+
     async def get_positions(self, symbol: str) -> list[dict]:
         try:
             product_id = self._product_id(symbol)
@@ -182,32 +206,25 @@ class NadoClient(BaseExchangeClient):
             )
             if not info:
                 return []
-            positions = []
-            for pb in info.perp_balances:
-                if pb.product_id != product_id:
-                    continue
-                amount = int(pb.balance.amount) / 1e18
-                if abs(amount) > 0:
-                    # C4 fix: vQuoteBalance에서 entry_price 추출 (기존: 항상 0)
-                    entry_price = 0.0
-                    try:
-                        vqb = getattr(pb.balance, 'v_quote_balance', None)
-                        if vqb is None:
-                            vqb = getattr(pb.balance, 'vQuoteBalance', None)
-                        if vqb is not None and abs(amount) > 0:
-                            entry_price = abs(int(vqb) / 1e18 / amount)
-                    except Exception:
-                        pass
-                    positions.append({
-                        "side": "LONG" if amount > 0 else "SHORT",
-                        "size": abs(amount),
-                        "entry_price": entry_price,
-                        "notional": abs(amount) * entry_price if entry_price > 0 else 0,
-                    })
-            return positions
+            return self._parse_positions(info, product_id)
         except Exception as e:
             logger.error(f"NADO get_positions: {e}")
         return []
+
+    async def get_positions_strict(self, symbol: str) -> Optional[list[dict]]:
+        """None = API failure, [] = genuine empty."""
+        try:
+            product_id = self._product_id(symbol)
+            info = await asyncio.to_thread(
+                self._client.subaccount.get_engine_subaccount_summary,
+                self._subaccount_hex,
+            )
+            if not info:
+                return []
+            return self._parse_positions(info, product_id)
+        except Exception as e:
+            logger.error(f"NADO get_positions_strict FAILED (returning None): {e}")
+            return None
 
     async def get_mark_price(self, symbol: str) -> Optional[float]:
         # MarketPriceData: bid_x18, ask_x18 (x18 strings)
