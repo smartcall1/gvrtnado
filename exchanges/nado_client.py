@@ -292,6 +292,12 @@ class NadoClient(BaseExchangeClient):
             if side.upper() != "BUY":
                 amount_x18 = -amount_x18
 
+            logger.info(
+                f"NADO order encode: {symbol} {side} size={size} price={price} "
+                f"→ amount_x18={amount_x18} price_x18={price_x18} "
+                f"margin={isolated_margin} inc={{price:{price_inc}, size:{size_inc}}}"
+            )
+
             def _build_order(appx):
                 return OrderParams(
                     sender=self._subaccount_hex,
@@ -323,6 +329,10 @@ class NadoClient(BaseExchangeClient):
                             if isolated_margin > 0:
                                 actual_margin = isolated_margin * _margin_mult
                                 margin_x6 = int(Decimal(str(actual_margin)) * 10**6)
+                                logger.info(
+                                    f"NADO isolated margin: ${actual_margin:.2f} → x6={margin_x6} "
+                                    f"(mult={_margin_mult}, appendix_margin_bits={margin_x6:#x})"
+                                )
                                 appendix = build_appendix(order_type, isolated=True, isolated_margin=margin_x6)
                             else:
                                 appendix = build_appendix(order_type, isolated=True)
