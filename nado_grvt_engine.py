@@ -74,6 +74,7 @@ class DeltaNeutralBot:
         self._idle_since: float = 0.0
         self._enter_since: float = 0.0
         self._oi_blocked: dict[str, float] = {}  # pair → unblock_at timestamp
+        self._last_topup_attempt: float = 0.0
 
     def _init_earn(self) -> EarnState:
         if self._state.earn:
@@ -309,6 +310,7 @@ class DeltaNeutralBot:
         if result == "ok":
             self._state.cycle_id = str(uuid.uuid4())[:8]
             self._state.entered_at = time.time()
+            self._state.target_notional = notional
             self._state.cumulative_funding = 0.0
             # 진입 직후엔 NADO 진입 측 추정만(maker) 잡고, GRVT는 다음 잔고 폴링에서 API 실제값으로 갱신.
             # 청산 시점에 NADO 라운드트립 + GRVT 실제 누적으로 재집계 (_handle_exit).
@@ -487,12 +489,84 @@ class DeltaNeutralBot:
                 # cumulative_funding은 메모리 누적 — 크래시/재시작 시 디스크 미반영이면 증발
                 self._save_state()
 
+        # ── HOLD 중 자동 증량: 부분 체결 시 목표까지 추가 진입 ──
+        await self._try_topup(pair)
+
         self._log_jsonl("spread_history.jsonl", {
             "pair": pair, "mode": self._state.mode.value,
             "nado_price": self._nado_price, "grvt_price": self._grvt_price,
             "nado_pnl": nado_pnl, "grvt_pnl": grvt_pnl, "spread_mtm": spread_mtm,
             "hold_hours": hold_hours, "margin": worst_margin,
         })
+
+    async def _try_topup(self, pair: str):
+        target = self._state.target_notional
+        if target <= 0:
+            return
+        current = sum(p.notional for p in self._positions.values()) / 2
+        if current >= target * 0.90:
+            return
+        now = time.time()
+        if now - self._last_topup_attempt < 300:
+            return
+        self._last_topup_attempt = now
+
+        if not self._nado_price or not self._grvt_price:
+            return
+        if max(self._nado_price, self._grvt_price) / min(self._nado_price, self._grvt_price) > 2.0:
+            return
+
+        remaining = target - current
+        chunk_size = remaining / max(1, round(remaining / (target / self.cfg.ENTRY_CHUNKS)))
+        direction = self._state.direction
+        nado_side = "BUY" if direction == "A" else "SELL"
+        grvt_side = "SELL" if direction == "A" else "BUY"
+        nado_pos_side = "LONG" if nado_side == "BUY" else "SHORT"
+
+        slip = self.cfg.SLIPPAGE_PCT
+        nado_taker_price = self._nado_price * (1 + slip) if nado_side == "BUY" else self._nado_price * (1 - slip)
+        nado_qty = chunk_size / self._nado_price
+        grvt_qty = chunk_size / self._grvt_price
+        nado_max_lev = self._nado.get_max_leverage(pair)
+        nado_eff_lev = min(self.cfg.LEVERAGE, nado_max_lev)
+        nado_margin = chunk_size / nado_eff_lev
+
+        logger.info(f"[TOPUP] {pair} 목표 ${target:.0f} 현재 ${current:.0f} → 증량 ${chunk_size:.0f}")
+
+        grvt_ok, grvt_filled, grvt_price = await self._grvt_open_with_xemm(pair, grvt_side, grvt_qty)
+        if not grvt_ok:
+            logger.warning(f"[TOPUP] GRVT maker 실패 — 다음 시도까지 5분 대기")
+            return
+
+        nado_res = await self._nado.place_limit_order(
+            pair, nado_side, nado_qty, nado_taker_price, isolated_margin=nado_margin,
+        )
+        if nado_res.status not in ("filled", "matched"):
+            logger.error(f"[TOPUP] NADO taker 실패 ({nado_res.message}) — GRVT 롤백")
+            await self._grvt.close_position(pair, grvt_side, grvt_filled, self.cfg.EMERGENCY_SLIPPAGE_PCT)
+            return
+
+        nado_cost = nado_res.filled_size * nado_res.filled_price
+        grvt_cost = grvt_filled * grvt_price
+
+        nado_old_qty = self._positions["nado"].notional / self._positions["nado"].entry_price if self._positions["nado"].entry_price > 0 else 0
+        self._positions["nado"].notional += nado_cost
+        nado_total_qty = nado_old_qty + nado_res.filled_size
+        self._positions["nado"].entry_price = self._positions["nado"].notional / nado_total_qty if nado_total_qty > 0 else nado_res.filled_price
+        self._positions["nado"].margin = self._positions["nado"].notional / self.cfg.LEVERAGE
+
+        grvt_old_qty = self._positions["grvt"].notional / self._positions["grvt"].entry_price if self._positions["grvt"].entry_price > 0 else 0
+        self._positions["grvt"].notional += grvt_cost
+        grvt_total_qty = grvt_old_qty + grvt_filled
+        self._positions["grvt"].entry_price = self._positions["grvt"].notional / grvt_total_qty if grvt_total_qty > 0 else grvt_price
+        self._positions["grvt"].margin = self._positions["grvt"].notional / self.cfg.LEVERAGE
+        self._save_state()
+
+        new_current = sum(p.notional for p in self._positions.values()) / 2
+        logger.info(f"[TOPUP] {pair} 증량 완료 ${current:.0f} → ${new_current:.0f} / 목표 ${target:.0f}")
+        await self._telegram.send_alert(
+            f"[TOPUP] {pair} ${current:.0f}→${new_current:.0f} / 목표${target:.0f}"
+        )
 
     async def _handle_exit(self):
         pair = self._state.pair
@@ -1354,6 +1428,13 @@ class DeltaNeutralBot:
             if not self._state.direction:
                 self._state.direction = "A" if nado_side == "LONG" else "B"
             self._state.cycle_state = CycleState.HOLD
+            if self._state.target_notional <= 0:
+                nado_bal = await self._nado.get_balance()
+                grvt_bal = await self._grvt.get_balance()
+                nado_max_lev = self._nado.get_max_leverage(pair)
+                eff_lev = min(self.cfg.LEVERAGE, nado_max_lev)
+                self._state.target_notional = calc_notional(nado_bal, grvt_bal, eff_lev, self.cfg.MARGIN_BUFFER)
+                logger.info(f"Recovery: target_notional=${self._state.target_notional:.0f} (역산)")
             self._save_state()
             logger.info(f"Recovery: restored positions for {pair}, direction={self._state.direction}")
             await self._telegram.send_alert(f"[RECOVERY] 포지션 복원 완료: {pair} (direction={self._state.direction})")

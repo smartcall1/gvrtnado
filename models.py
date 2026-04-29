@@ -152,6 +152,7 @@ class BotState:
     grvt_balance: float = 0.0
     entry_total_balance: float = 0.0  # 진입 직전 실제 잔고 합 (URGENT break-even 비교용)
     entry_baseline_real: bool = False  # True=실제 진입 baseline, False=recovery fallback (URGENT 트리거 차단)
+    target_notional: float = 0.0  # 목표 notional — HOLD 중 부분 체결 시 자동 증량 기준
     positions: dict = field(default_factory=dict)
     earn: dict = field(default_factory=dict)
     boost_config: dict = field(default_factory=dict)
@@ -172,6 +173,7 @@ class BotState:
             "grvt_balance": self.grvt_balance,
             "entry_total_balance": self.entry_total_balance,
             "entry_baseline_real": self.entry_baseline_real,
+            "target_notional": self.target_notional,
             "positions": self.positions,
             "earn": self.earn,
             "boost_config": self.boost_config,
@@ -200,6 +202,7 @@ class BotState:
             grvt_balance=d.get("grvt_balance", 0),
             entry_total_balance=d.get("entry_total_balance", 0),
             entry_baseline_real=d.get("entry_baseline_real", False),
+            target_notional=d.get("target_notional", 0),
             positions=d.get("positions", {}),
             earn=d.get("earn", {}),
             exit_reason=d.get("exit_reason", ""),
