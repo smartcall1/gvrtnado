@@ -226,6 +226,8 @@ class NadoClient(BaseExchangeClient):
             logger.error(f"NADO get_positions_strict FAILED (returning None): {e}")
             return None
 
+    _PRICE_SENTINEL_THRESHOLD = 1e10
+
     async def get_mark_price(self, symbol: str) -> Optional[float]:
         # MarketPriceData: bid_x18, ask_x18 (x18 strings)
         try:
@@ -236,7 +238,14 @@ class NadoClient(BaseExchangeClient):
             if data:
                 bid = int(data.bid_x18) / 1e18
                 ask = int(data.ask_x18) / 1e18
-                return (bid + ask) / 2
+                mid = (bid + ask) / 2
+                if mid > self._PRICE_SENTINEL_THRESHOLD:
+                    logger.warning(
+                        f"NADO {symbol} price sentinel: bid={bid:.4g} ask={ask:.4g} "
+                        f"(bid_x18={data.bid_x18}) — empty orderbook?"
+                    )
+                    return None
+                return mid
         except Exception as e:
             logger.error(f"NADO get_mark_price: {e}")
         return None
@@ -250,6 +259,11 @@ class NadoClient(BaseExchangeClient):
             if data:
                 bid = int(data.bid_x18) / 1e18
                 ask = int(data.ask_x18) / 1e18
+                if bid > self._PRICE_SENTINEL_THRESHOLD or ask > self._PRICE_SENTINEL_THRESHOLD:
+                    logger.warning(
+                        f"NADO {symbol} BBO sentinel: bid={bid:.4g} ask={ask:.4g} — empty orderbook?"
+                    )
+                    return {"bid": 0.0, "ask": 0.0, "mark": 0.0}
                 return {"bid": bid, "ask": ask, "mark": (bid + ask) / 2}
         except Exception as e:
             logger.error(f"NADO get_bbo: {e}")
@@ -292,12 +306,6 @@ class NadoClient(BaseExchangeClient):
             if side.upper() != "BUY":
                 amount_x18 = -amount_x18
 
-            logger.info(
-                f"NADO order encode: {symbol} {side} size={size} price={price} "
-                f"→ amount_x18={amount_x18} price_x18={price_x18} "
-                f"margin={isolated_margin} inc={{price:{price_inc}, size:{size_inc}}}"
-            )
-
             def _build_order(appx):
                 return OrderParams(
                     sender=self._subaccount_hex,
@@ -329,10 +337,6 @@ class NadoClient(BaseExchangeClient):
                             if isolated_margin > 0:
                                 actual_margin = isolated_margin * _margin_mult
                                 margin_x6 = int(Decimal(str(actual_margin)) * 10**6)
-                                logger.info(
-                                    f"NADO isolated margin: ${actual_margin:.2f} → x6={margin_x6} "
-                                    f"(mult={_margin_mult}, appendix_margin_bits={margin_x6:#x})"
-                                )
                                 appendix = build_appendix(order_type, isolated=True, isolated_margin=margin_x6)
                             else:
                                 appendix = build_appendix(order_type, isolated=True)

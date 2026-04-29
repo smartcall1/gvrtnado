@@ -229,6 +229,14 @@ class DeltaNeutralBot:
             logger.info(f"[ENTER] {pair} prices: NADO={self._nado_price} GRVT={self._grvt_price} — skipping (None)")
             return
 
+        price_ratio = max(self._nado_price, self._grvt_price) / min(self._nado_price, self._grvt_price)
+        if price_ratio > 2.0:
+            logger.warning(
+                f"[ENTER] {pair} price divergence {price_ratio:.1f}x "
+                f"(NADO=${self._nado_price:.4g} GRVT=${self._grvt_price:.4g}) — skipping"
+            )
+            return
+
         favorable = is_entry_favorable(direction, self._nado_price, self._grvt_price)
         if not favorable:
             mode = self._state.mode
@@ -677,6 +685,9 @@ class DeltaNeutralBot:
             nado_price = await self._nado.get_mark_price(pair)
             grvt_price = await self._grvt.get_mark_price(pair)
             if not nado_price or not grvt_price:
+                break
+            if max(nado_price, grvt_price) / min(nado_price, grvt_price) > 2.0:
+                logger.warning(f"Chunk {i+1}: price divergence NADO=${nado_price:.4g} GRVT=${grvt_price:.4g} — break")
                 break
 
             nado_qty = chunk_size / nado_price
