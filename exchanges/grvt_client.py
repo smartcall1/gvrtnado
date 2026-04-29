@@ -209,13 +209,14 @@ class GrvtClient(BaseExchangeClient):
     async def get_bbo(self, symbol: str) -> dict:
         try:
             grvt_sym = self._grvt_symbol(symbol)
-            ticker = await self._retry(self._api.fetch_ticker, grvt_sym)
-            if ticker:
-                return {
-                    "bid": float(ticker.get("bid", 0) or 0),
-                    "ask": float(ticker.get("ask", 0) or 0),
-                    "mark": float(ticker.get("mark_price", ticker.get("last_price", 0))),
-                }
+            book = await self._retry(self._api.fetch_order_book, grvt_sym, 1)
+            if isinstance(book, dict):
+                bids = book.get("bids", [])
+                asks = book.get("asks", [])
+                bid = float(bids[0]["price"] if isinstance(bids[0], dict) else bids[0][0]) if bids else 0.0
+                ask = float(asks[0]["price"] if isinstance(asks[0], dict) else asks[0][0]) if asks else 0.0
+                mark = (bid + ask) / 2 if bid > 0 and ask > 0 else await self.get_mark_price(symbol) or 0.0
+                return {"bid": bid, "ask": ask, "mark": mark}
         except Exception as e:
             logger.error(f"GRVT get_bbo: {e}")
         return {"bid": 0.0, "ask": 0.0, "mark": 0.0}
