@@ -503,9 +503,25 @@ class DeltaNeutralBot:
         target = self._state.target_notional
         if target <= 0:
             return
-        current = sum(p.notional for p in self._positions.values()) / 2
-        if current >= target * 0.90:
+        if "nado" not in self._positions or "grvt" not in self._positions:
             return
+
+        nado_notional = self._positions["nado"].notional
+        grvt_notional = self._positions["grvt"].notional
+        avg_notional = (nado_notional + grvt_notional) / 2
+        if avg_notional >= target * 0.90:
+            return
+
+        # imbalance 가드: 양쪽 괴리 5% 초과 시 topup 중단
+        if avg_notional > 0:
+            imbalance = abs(nado_notional - grvt_notional) / avg_notional
+            if imbalance > 0.05:
+                logger.warning(
+                    f"[TOPUP] imbalance {imbalance:.1%} "
+                    f"(NADO=${nado_notional:.0f} GRVT=${grvt_notional:.0f}) — 증량 보류"
+                )
+                return
+
         now = time.time()
         if now - self._last_topup_attempt < 300:
             return
@@ -516,12 +532,12 @@ class DeltaNeutralBot:
         if max(self._nado_price, self._grvt_price) / min(self._nado_price, self._grvt_price) > 2.0:
             return
 
-        remaining = target - current
+        remaining = target - avg_notional
         chunk_size = remaining / max(1, round(remaining / (target / self.cfg.ENTRY_CHUNKS)))
         direction = self._state.direction
         nado_side = "BUY" if direction == "A" else "SELL"
         grvt_side = "SELL" if direction == "A" else "BUY"
-        nado_pos_side = "LONG" if nado_side == "BUY" else "SHORT"
+        grvt_pos_side = "SHORT" if direction == "A" else "LONG"
 
         slip = self.cfg.SLIPPAGE_PCT
         nado_taker_price = self._nado_price * (1 + slip) if nado_side == "BUY" else self._nado_price * (1 - slip)
@@ -531,7 +547,10 @@ class DeltaNeutralBot:
         nado_eff_lev = min(self.cfg.LEVERAGE, nado_max_lev)
         nado_margin = chunk_size / nado_eff_lev
 
-        logger.info(f"[TOPUP] {pair} 목표 ${target:.0f} 현재 ${current:.0f} → 증량 ${chunk_size:.0f}")
+        logger.info(
+            f"[TOPUP] {pair} 목표 ${target:.0f} 현재 ${avg_notional:.0f} "
+            f"(NADO=${nado_notional:.0f} GRVT=${grvt_notional:.0f}) → 증량 ${chunk_size:.0f}"
+        )
 
         grvt_ok, grvt_filled, grvt_price = await self._grvt_open_with_xemm(pair, grvt_side, grvt_qty)
         if not grvt_ok:
@@ -543,7 +562,8 @@ class DeltaNeutralBot:
         )
         if nado_res.status not in ("filled", "matched"):
             logger.error(f"[TOPUP] NADO taker 실패 ({nado_res.message}) — GRVT 롤백")
-            await self._grvt.close_position(pair, grvt_side, grvt_filled, self.cfg.EMERGENCY_SLIPPAGE_PCT)
+            await self._grvt.close_position(pair, grvt_pos_side, grvt_filled, self.cfg.EMERGENCY_SLIPPAGE_PCT)
+            await self._telegram.send_alert(f"[TOPUP FAIL] NADO 실패 → GRVT 롤백 시도")
             return
 
         nado_cost = nado_res.filled_size * nado_res.filled_price
@@ -562,10 +582,10 @@ class DeltaNeutralBot:
         self._positions["grvt"].margin = self._positions["grvt"].notional / self.cfg.LEVERAGE
         self._save_state()
 
-        new_current = sum(p.notional for p in self._positions.values()) / 2
-        logger.info(f"[TOPUP] {pair} 증량 완료 ${current:.0f} → ${new_current:.0f} / 목표 ${target:.0f}")
+        new_avg = sum(p.notional for p in self._positions.values()) / 2
+        logger.info(f"[TOPUP] {pair} 증량 완료 ${avg_notional:.0f} → ${new_avg:.0f} / 목표 ${target:.0f}")
         await self._telegram.send_alert(
-            f"[TOPUP] {pair} ${current:.0f}→${new_current:.0f} / 목표${target:.0f}"
+            f"[TOPUP] {pair} ${avg_notional:.0f}→${new_avg:.0f} / 목표${target:.0f}"
         )
 
     async def _handle_exit(self):
