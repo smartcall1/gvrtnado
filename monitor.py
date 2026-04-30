@@ -40,7 +40,10 @@ class CircuitBreaker:
         self._fails[exchange] = self._fails.get(exchange, 0) + 1
 
     def record_success(self, exchange: str):
-        self._fails[exchange] = 0
+        # 즉시 0 리셋 대신 1씩 감소 — 간헐적 503에서 단 1회 성공으로 CB가 클리어되어
+        # HOLD_SUSPENDED ↔ HOLD 플랩 루프 방지. 연속 성공해야 완전히 클리어됨.
+        current = self._fails.get(exchange, 0)
+        self._fails[exchange] = max(0, current - 1)
 
     def is_tripped(self, exchange: str) -> bool:
         return self._fails.get(exchange, 0) >= self._max_fails

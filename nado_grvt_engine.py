@@ -78,6 +78,8 @@ class DeltaNeutralBot:
         # HOLD_SUSPENDED 상태 추적 (API 장애 시 포지션 유지 대기)
         self._suspended_since: float = 0.0
         self._suspended_alerted: bool = False
+        # EXIT 상태 stuck 추적 (API 장애 등으로 청산 반복 실패 시 MANUAL 에스컬레이션)
+        self._exit_stuck_since: float = 0.0
 
     def _init_earn(self) -> EarnState:
         if self._state.earn:
@@ -616,9 +618,11 @@ class DeltaNeutralBot:
         pair = self._state.pair
         elapsed = time.time() - self._suspended_since
 
-        # 양쪽 API 핑
-        nado_ok = await self._nado.get_mark_price(pair) is not None
-        grvt_ok = await self._grvt.get_mark_price(pair) is not None
+        # 양쪽 API 핑 — truthiness 체크 (0.0도 실패로 간주, _handle_hold과 동일 기준)
+        nado_price = await self._nado.get_mark_price(pair)
+        grvt_price = await self._grvt.get_mark_price(pair)
+        nado_ok = bool(nado_price)
+        grvt_ok = bool(grvt_price)
 
         if nado_ok:
             self._cb.record_success("nado")
@@ -675,11 +679,27 @@ class DeltaNeutralBot:
         success = await self._execute_exit(pair)
 
         if not success:
-            logger.warning("Exit failed, will retry next tick")
-            await self._telegram.send_alert(f"[⚠️ EXIT RETRY] {pair} 청산 재시도 예정")
-            self._save_state()
+            if self._exit_stuck_since == 0:
+                self._exit_stuck_since = time.time()
+            elapsed = time.time() - self._exit_stuck_since
+            # 10분 이상 EXIT 실패 반복 → MANUAL_INTERVENTION 에스컬레이션
+            # (API 장애나 유동성 문제로 인한 무한 retry 방지)
+            if elapsed >= 600:
+                logger.critical(f"EXIT {elapsed:.0f}초 반복 실패 — MANUAL_INTERVENTION 전환")
+                self._state.cycle_state = CycleState.MANUAL_INTERVENTION
+                self._state.exit_reason = "exit_stuck"
+                self._save_state()
+                await self._telegram.send_alert(
+                    f"[⛔ EXIT STUCK] {pair} {elapsed/60:.0f}분째 청산 실패\n"
+                    f"MANUAL_INTERVENTION 전환 — 수동 청산 필요"
+                )
+            else:
+                logger.warning(f"Exit failed ({elapsed:.0f}초째), will retry next tick")
+                await self._telegram.send_alert(f"[⚠️ EXIT RETRY] {pair} 청산 재시도 예정 ({elapsed:.0f}s)")
+                self._save_state()
             return
 
+        self._exit_stuck_since = 0.0  # 청산 성공 시 타이머 리셋
         nado_p = self._positions.get("nado")
         grvt_p = self._positions.get("grvt")
         nado_pnl = nado_p.calc_unrealized_pnl(self._nado_price) if nado_p and self._nado_price else 0
@@ -1895,6 +1915,9 @@ class DeltaNeutralBot:
         if self._state.cycle_state == CycleState.HOLD_SUSPENDED and self._suspended_since == 0:
             self._suspended_since = time.time()
             logger.info("HOLD_SUSPENDED 상태에서 재시작 — suspended 타이머 리셋")
+        # EXIT 상태에서 재시작 시 stuck 타이머 리셋 (재시작 자체가 새 시도이므로)
+        if self._state.cycle_state == CycleState.EXIT:
+            self._exit_stuck_since = 0.0
 
         self._last_status_log = 0.0
         try:
