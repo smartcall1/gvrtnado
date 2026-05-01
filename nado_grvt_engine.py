@@ -982,6 +982,10 @@ class DeltaNeutralBot:
                 await self._telegram.send_alert(f"[⚠️ IMBALANCE] {imbalance:.1%} — 전량 롤백")
                 await self._nado.cancel_all_orders(pair)
                 await self._grvt.cancel_all_orders(pair)
+                logger.info(
+                    f"Imbalance rollback: NADO close {pair} {nado_pos_side} qty={nado_filled_qty:.4f},"
+                    f" GRVT close {pair} {grvt_pos_side} qty={grvt_filled_qty:.4f}"
+                )
                 await asyncio.gather(
                     self._nado.close_position(pair, nado_pos_side, nado_filled_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT),
                     self._grvt.close_position(pair, grvt_pos_side, grvt_filled_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT),
@@ -989,6 +993,7 @@ class DeltaNeutralBot:
                 return "failed"
         elif nado_notional > 0 and grvt_notional == 0:
             logger.warning("Only NADO filled, GRVT empty — rolling back NADO")
+            logger.info(f"Entry rollback: NADO close {pair} {nado_pos_side} qty={nado_filled_qty:.4f}")
             rollback_ok = await self._nado.close_position(pair, nado_pos_side, nado_filled_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT)
             if not rollback_ok:
                 # Rollback failed — register the orphan so the next EXIT cycle keeps trying
@@ -1362,11 +1367,17 @@ class DeltaNeutralBot:
                 logger.warning(f"Exit chunk {i+1}: GRVT 미청산 → NADO 청산 보류 (편측 노출 방지)")
             elif nado_pos and nado_chunk_qty > 0:
                 try:
+                    logger.info(
+                        f"Exit chunk {i+1}: NADO close {pair} {nado_pos.side}"
+                        f" qty={nado_chunk_qty:.4f} slippage={self.cfg.SLIPPAGE_PCT*100:.1f}%"
+                    )
                     nado_done = await self._nado.close_position(
                         pair, nado_pos.side, nado_chunk_qty,
                         slippage_pct=self.cfg.SLIPPAGE_PCT,
                     )
-                    if not nado_done:
+                    if nado_done:
+                        logger.info(f"Exit chunk {i+1}: NADO close 완료")
+                    else:
                         logger.warning(
                             f"Exit chunk {i+1}: NADO close 실패 — 다음 retry에서 처리"
                         )
@@ -1466,7 +1477,12 @@ class DeltaNeutralBot:
                     continue  # GRVT 실패면 NADO 건드리지 않고 다음 retry
             if nado_needs_close:
                 side = (nado_remaining[0].get("side") or "LONG").upper()
-                await self._nado.close_position(pair, side, nado_size, self.cfg.EMERGENCY_SLIPPAGE_PCT)
+                logger.info(f"Exit retry {attempt+1}: NADO close {pair} {side} qty={nado_size:.4f}")
+                nado_retry_ok = await self._nado.close_position(pair, side, nado_size, self.cfg.EMERGENCY_SLIPPAGE_PCT)
+                if nado_retry_ok:
+                    logger.info(f"Exit retry {attempt+1}: NADO close 완료")
+                else:
+                    logger.warning(f"Exit retry {attempt+1}: NADO close 실패")
         return False
 
     async def _emergency_exit(self, reason: str):

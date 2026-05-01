@@ -394,16 +394,22 @@ class NadoClient(BaseExchangeClient):
         try:
             mark = await self.get_mark_price(symbol)
             if not mark:
+                logger.warning(f"NADO close {symbol}: mark price 조회 실패 → _close_all fallback")
                 return await self._close_all(symbol)
             close_side = "SELL" if side.upper() == "LONG" else "BUY"
             if close_side == "BUY":
                 close_price = mark * (1 + slippage_pct)
             else:
                 close_price = mark * (1 - slippage_pct)
+            logger.info(
+                f"NADO close {symbol}: {close_side} {size:.4f} @ {close_price:.4f}"
+                f" (mark={mark:.4f}, slippage={slippage_pct*100:.1f}%)"
+            )
             res = await self.place_limit_order(symbol, close_side, size, close_price)
             if res.status in ("filled", "matched"):
+                logger.info(f"NADO close {symbol}: 체결 완료 (status={res.status}, order_id={res.order_id})")
                 return True
-            logger.warning(f"NADO partial close failed (status={res.status}), trying full close")
+            logger.warning(f"NADO close {symbol}: 미체결 (status={res.status}, order_id={res.order_id}) → _close_all fallback")
             return await self._close_all(symbol)
         except Exception as e:
             logger.error(f"NADO close_position: {e}")
@@ -412,13 +418,19 @@ class NadoClient(BaseExchangeClient):
     async def _close_all(self, symbol: str) -> bool:
         try:
             product_id = self._product_id(symbol)
+            logger.info(f"NADO close {symbol}: _close_all (시장가 전량 청산)")
             result = await asyncio.to_thread(
                 self._client.market.close_position,
                 self._subaccount_hex,
                 product_id,
             )
             if result:
-                return "success" in str(result.status).lower()
+                ok = "success" in str(result.status).lower()
+                if ok:
+                    logger.info(f"NADO close {symbol}: _close_all 완료 (status={result.status})")
+                else:
+                    logger.warning(f"NADO close {symbol}: _close_all 실패 (status={result.status})")
+                return ok
         except Exception as e:
             logger.error(f"NADO _close_all: {e}")
         return False
