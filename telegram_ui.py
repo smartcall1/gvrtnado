@@ -6,18 +6,23 @@ from typing import Callable, Awaitable, Optional
 logger = logging.getLogger(__name__)
 
 BTN_STATUS = "📊 Status"
+BTN_FUNDING = "💰 Funding"
 BTN_HISTORY = "📋 History"
-BTN_EARN = "💰 Earn"
-BTN_FUNDING = "📈 Funding"
-BTN_REBALANCE = "🔄 Rebalance"
+BTN_RESYNC = "🔄 Resync"
+BTN_CLOSE = "🔚 Close Now"
 BTN_STOP = "⏹ Stop"
+BTN_EARN = "💎 Earn"
 BTN_SETBOOST = "🎯 SetBoost"
+
+# legacy alias — 기존 핸들러 호환
+BTN_REBALANCE = BTN_RESYNC
 
 KEYBOARD = {
     "keyboard": [
-        [BTN_STATUS, BTN_HISTORY, BTN_EARN],
-        [BTN_FUNDING, BTN_REBALANCE, BTN_STOP],
-        [BTN_SETBOOST],
+        [BTN_STATUS, BTN_FUNDING],
+        [BTN_HISTORY, BTN_RESYNC],
+        [BTN_CLOSE, BTN_STOP],
+        [BTN_EARN, BTN_SETBOOST],
     ],
     "resize_keyboard": True,
     "is_persistent": True,

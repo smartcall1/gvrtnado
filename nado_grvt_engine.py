@@ -28,7 +28,7 @@ from strategy import (
 )
 from pair_manager import PairManager
 from monitor import MarginLevel, check_margin_level, CircuitBreaker, check_price_divergence
-from telegram_ui import TelegramUI, BTN_STATUS, BTN_HISTORY, BTN_EARN, BTN_FUNDING, BTN_REBALANCE, BTN_STOP
+from telegram_ui import TelegramUI, BTN_STATUS, BTN_HISTORY, BTN_EARN, BTN_FUNDING, BTN_REBALANCE, BTN_STOP, BTN_CLOSE
 from exchanges.nado_client import NadoClient
 from exchanges.grvt_client import GrvtClient
 
@@ -1639,24 +1639,28 @@ class DeltaNeutralBot:
             nado_bal = self._state.nado_balance
             grvt_bal = self._state.grvt_balance
 
-            # 헤더: 상태 + 페어 + 보유시간을 한 줄로 (한글 단위 통일)
+            # --- 보유시간 ---
             hold_seconds = (time.time() - self._state.entered_at) if (self._state.entered_at and nado_pos and grvt_pos) else 0
-            hold_str = ""
             if hold_seconds > 0:
-                hold_str = f" · 보유 {hold_seconds/3600:.1f}시간" if hold_seconds >= 3600 else f" · 보유 {int(hold_seconds/60)}분"
+                hold_h = hold_seconds / 3600
+                hold_str = f" · 보유 {hold_h:.1f}h" if hold_h >= 1 else f" · 보유 {int(hold_seconds/60)}m"
+            else:
+                hold_str = ""
 
+            # --- 부스트 ---
             boost = self._pair_mgr.get_boost(pair)
             boost_str = ""
             if boost.get("nado", 1.0) != 1.0 or boost.get("grvt", 1.0) != 1.0:
-                boost_str = f" · 부스트 N{boost['nado']:.1f}× G{boost['grvt']:.1f}×"
+                boost_str = f" [N{boost['nado']:.1f}× G{boost['grvt']:.1f}×]"
 
-            DIV_HEAVY = "━━━━━━━━━━━━━━━━"
+            DIV = "━━━━━━━━━━━━━━━━"
 
-            # 헤더 + 모드: 모바일 폭 위해 별도 줄
-            header = f"📊 <b>{cycle}</b> · {pair}{hold_str}"
-            if boost_str:
-                header += boost_str
-            lines = [header, f"🎯 {mode}", DIV_HEAVY]
+            # === 헤더 + 모드 + 구분선 ===
+            lines = [
+                f"📊 <b>{cycle}</b> · {pair}{hold_str}",
+                f"🎯 {mode}{boost_str}",
+                DIV,
+            ]
 
             if nado_pos and grvt_pos:
                 total_bal = nado_bal + grvt_bal
@@ -1669,7 +1673,7 @@ class DeltaNeutralBot:
                 nado_chg = ((nado_curr - nado_pos.entry_price) / nado_pos.entry_price * 100) if nado_pos.entry_price > 0 else 0
                 grvt_chg = ((grvt_curr - grvt_pos.entry_price) / grvt_pos.entry_price * 100) if grvt_pos.entry_price > 0 else 0
 
-                # === 잔고 + PnL (모바일 위해 다중 줄) ===
+                # === 잔고 + PnL ===
                 real_pnl = None
                 if self._state.entry_total_balance > 0:
                     real_pnl = total_bal - self._state.entry_total_balance
@@ -1678,40 +1682,39 @@ class DeltaNeutralBot:
                     pnl_emoji = "🟢" if real_pnl >= 0 else "🔴"
                     lines.append(f"💰 <b>${total_bal:,.0f}</b> {pnl_emoji} <b>${real_pnl:+,.2f}</b>")
                     lines.append(f"   <i>(N ${nado_bal:,.2f} / G ${grvt_bal:,.2f})</i>")
-                    lines.append(f"   진입 ${self._state.entry_total_balance:,.0f}")
-                    if not self._state.entry_baseline_real:
-                        lines.append(f"   ⚠️ baseline 임시")
+                    baseline_warn = "" if self._state.entry_baseline_real else " [⚠️ baseline 임시]"
+                    lines.append(f"   진입 ${self._state.entry_total_balance:,.0f}{baseline_warn}")
 
-                    # 다음 트리거 — 짧게
+                    # 익절/손절 트리거
                     urgent_th = self.cfg.URGENT_BREAK_EVEN_THRESHOLD
                     mp = self.cfg.mode_params(mode)
                     profit_th = mp['spread_exit']
+                    sl_str = f"📐 손절 -${abs(self.cfg.SPREAD_STOPLOSS):.0f}"
                     if mode == "VOLUME_URGENT" and self._state.entry_baseline_real:
                         if real_pnl < urgent_th:
                             need = urgent_th - real_pnl
-                            lines.append(f"   ⚡ 본전 +${urgent_th:.0f} 까지 <b>${need:,.2f}</b>")
+                            lines.append(f"   ⚡ 본전까지 <b>${need:,.2f}</b> / {sl_str}")
                         elif real_pnl < profit_th:
                             need = profit_th - real_pnl
-                            lines.append(f"   ⚡ 본전 ✓ · 익절 <b>${need:,.2f}</b>")
+                            lines.append(f"   ⚡ 본전 ✓ · 익절까지 <b>${need:,.2f}</b> / {sl_str}")
                         else:
-                            lines.append(f"   🎯 익절 도달")
+                            lines.append(f"   🎯 익절 도달 / {sl_str}")
                     else:
                         if real_pnl < profit_th:
                             need = profit_th - real_pnl
-                            lines.append(f"   🎯 익절 +${profit_th:.0f} 까지 <b>${need:,.2f}</b>")
+                            lines.append(f"   🎯 익절까지 <b>${need:,.2f}</b> / {sl_str}")
                         else:
-                            lines.append(f"   🎯 익절 도달")
-                    lines.append(f"   📐 손절 -${abs(self.cfg.SPREAD_STOPLOSS):.0f}")
+                            lines.append(f"   🎯 익절 도달 / {sl_str}")
                 else:
                     lines.append(f"💰 <b>${total_bal:,.0f}</b> ⚠️ baseline 없음")
 
-                # === 포지션 (가격 변동만, 진입/현재가 생략 — 모바일 폭 우선) ===
+                # === 헷지 포지션 ===
                 lines.append("")
                 lines.append(f"📍 헷지 {delta_emoji}")
                 lines.append(f"   N {nado_pos.side:5} ${nado_pos.notional:,.0f}  {nado_chg:+.2f}%")
                 lines.append(f"   G {grvt_pos.side:5} ${grvt_pos.notional:,.0f}  {grvt_chg:+.2f}%")
 
-                # === 펀딩 (APR · 정산시간 · raw 8h · 누적 펀딩/수수료) ===
+                # === 펀딩 APR ===
                 try:
                     nr = await self._nado.get_funding_rate(pair)
                     gr = await self._grvt.get_funding_rate(pair)
@@ -1733,11 +1736,11 @@ class DeltaNeutralBot:
                         grvt_min = max(0, int((next_grvt_dt - now_utc).total_seconds() / 60))
 
                         if abs(nado_min - grvt_min) < 5:
-                            settle_str = f"{nado_min}분"
+                            settle_str = f"{nado_min}m"
                         else:
                             gh, gm = grvt_min // 60, grvt_min % 60
-                            grvt_next_str = f"{gh}h {gm}m" if gh > 0 else f"{gm}분"
-                            settle_str = f"N {nado_min}분 / G {grvt_next_str}"
+                            grvt_next_str = f"{gh}h{gm}m" if gh > 0 else f"{gm}m"
+                            settle_str = f"N {nado_min}m / G {grvt_next_str}"
                         lines.append("")
                         lines.append(f"📈 펀딩 APR {apr_emoji} <b>{apr:+.1f}%</b>")
                         lines.append(f"   정산 {settle_str}")
@@ -1750,28 +1753,32 @@ class DeltaNeutralBot:
                 cum_fees = self._state.cumulative_fees
                 lines.append(f"   누적 펀딩 ${cum_funding:+,.2f} · 수수료 ${cum_fees:,.2f}")
 
-                # === 보유 한도 ===
+                # === 자동만기 ===
                 try:
                     mp = self.cfg.mode_params(mode)
                     max_remaining_h = max(0, self.cfg.MAX_HOLD_DAYS * 86400 - hold_seconds) / 3600
-                    max_str = f"{max_remaining_h/24:.1f}일" if max_remaining_h >= 24 else f"{max_remaining_h:.0f}시간"
+                    max_d = max_remaining_h / 24
+                    max_str = f"{max_d:.1f}d" if max_remaining_h >= 24 else f"{max_remaining_h:.1f}h"
                     min_remaining = max(0, mp['min_hold_hours'] * 3600 - hold_seconds)
+                    lines.append("")
                     if min_remaining > 0:
-                        min_str = f"{min_remaining/3600:.1f}시간" if min_remaining >= 3600 else f"{int(min_remaining/60)}분"
-                        lines.append(f"⏳ 최소 보유 {min_str} 남음 · 자동만기 {max_str}")
+                        min_h = min_remaining / 3600
+                        min_str = f"{min_h:.1f}h" if min_h >= 1 else f"{int(min_remaining/60)}m"
+                        lines.append(f"⏳ 최소 보유 {min_str} · 자동만기까지 {max_str}")
                     else:
                         lines.append(f"⏳ 자동만기까지 {max_str}")
                 except Exception:
                     pass
 
-                # === Earn (모바일 위해 2줄로) ===
+                # === 누적 (realized) ===
                 try:
                     days = self._earn.days_remaining(datetime.now(timezone.utc))
                     prog = self._earn.volume_progress() * 100
                     t_emoji = "✅" if self._earn.is_trades_target_met() else "❌"
                     v_emoji = "✅" if self._earn.is_volume_target_met() else "⏳"
                     lines.append("")
-                    lines.append(f"💎 {t_emoji} 거래 {self._earn.grvt_trades}/5 · {v_emoji} {prog:.0f}% · {days}일")
+                    lines.append("━ 누적 (realized) ━")
+                    lines.append(f"💎 거래 {self._earn.grvt_trades}/5 · {prog:.0f}% · {days}d")
                     lines.append(f"   <i>${self._earn.grvt_volume:,.0f} / ${self._earn.target_volume/1000:.0f}K</i>")
                 except Exception:
                     pass
@@ -1830,6 +1837,21 @@ class DeltaNeutralBot:
             else:
                 await self._telegram.send_message("현재 HOLD 상태가 아닙니다")
 
+        async def on_close_now():
+            if self._state.cycle_state != CycleState.HOLD:
+                await self._telegram.send_alert(
+                    f"현재 상태({self._state.cycle_state.value})에서는 강제 청산 불가\n"
+                    f"HOLD 상태에서만 가능"
+                )
+                return
+            if not self._positions:
+                await self._telegram.send_alert("청산할 포지션 없음")
+                return
+            self._state.cycle_state = CycleState.EXIT
+            self._state.exit_reason = "manual_close_now"
+            self._save_state()
+            await self._telegram.send_alert("🔚 강제 청산 시작 — EXIT 진입")
+
         async def on_stop():
             self._running = False
             if self._positions and self._state.pair:
@@ -1853,6 +1875,7 @@ class DeltaNeutralBot:
         self._telegram.register_callback(BTN_HISTORY, on_history)
         self._telegram.register_callback(BTN_FUNDING, on_funding)
         self._telegram.register_callback(BTN_REBALANCE, on_rebalance)
+        self._telegram.register_callback(BTN_CLOSE, on_close_now)
         self._telegram.register_callback(BTN_STOP, on_stop)
         self._telegram.register_text_handler(on_text)
 
