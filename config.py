@@ -87,8 +87,8 @@ class Config:
         self.LOG_DIR = Path("logs")
 
         # ===== 거래 실행 상세 설정 =====
-        self.ENTRY_CHUNKS = 5  # 진입 시 5개 청크로 분할 실행
-        self.EXIT_CHUNKS = 5  # 청산 시 5개 청크로 분할 실행
+        self.ENTRY_CHUNKS = 10
+        self.EXIT_CHUNKS = 10
         self.CHUNK_RETRY = 2  # 청크 재시도 횟수
         self.CHUNK_WAIT = 30  # 청크 간 대기 시간 (초)
         self.SLIPPAGE_PCT = 0.004  # 0.4% 슬리피지 (taker fallback 가격)
