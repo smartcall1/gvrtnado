@@ -201,8 +201,8 @@ class DeltaNeutralBot:
 
         nado_8h = normalize_funding_to_8h(nado_rate, self.cfg.NADO_FUNDING_PERIOD_H)
         grvt_8h = normalize_funding_to_8h(grvt_rate, self.cfg.GRVT_FUNDING_PERIOD_H)
-        direction = decide_direction(nado_8h, grvt_8h)
-        logger.info(f"[ANALYZE] {pair} NADO_8h={nado_8h:.6f} GRVT_8h={grvt_8h:.6f} dir={direction}")
+        direction = decide_direction(nado_8h, grvt_8h, self.cfg.MIN_FUNDING_SPREAD)
+        logger.info(f"[ANALYZE] {pair} NADO_8h={nado_8h:.6f} GRVT_8h={grvt_8h:.6f} spread={abs(nado_8h - grvt_8h):.6f} dir={direction}")
 
         if direction is None:
             mode = self._state.mode
@@ -214,6 +214,12 @@ class DeltaNeutralBot:
             if direction is None:
                 if not self._idle_since:
                     self._idle_since = time.time()
+                elif time.time() - self._idle_since > self.cfg.ANALYZE_TIMEOUT:
+                    logger.info(f"[ANALYZE] {pair} 방향 미결정 {self.cfg.ANALYZE_TIMEOUT/60:.0f}분 → IDLE 복귀 (다른 마켓 탐색)")
+                    self._oi_blocked[pair] = time.time() + 1800
+                    self._idle_since = 0.0
+                    self._state.cycle_state = CycleState.IDLE
+                    self._save_state()
                 return
 
         self._idle_since = 0

@@ -33,6 +33,23 @@ def test_decide_direction_both_negative():
     assert d is None
 
 
+def test_decide_direction_below_min_spread():
+    d = decide_direction(nado_8h=-0.000043, grvt_8h=0.000100)
+    assert d is None
+
+
+def test_decide_direction_above_min_spread():
+    d = decide_direction(nado_8h=-0.001, grvt_8h=0.001)
+    assert d == "A"
+
+
+def test_decide_direction_custom_min_spread():
+    d = decide_direction(nado_8h=-0.0001, grvt_8h=0.0001, min_spread=0.0001)
+    assert d == "A"
+    d2 = decide_direction(nado_8h=-0.0001, grvt_8h=0.0001, min_spread=0.001)
+    assert d2 is None
+
+
 def test_should_exit_spread_profit():
     assert should_exit_spread(55.0, 50.0) is True
     assert should_exit_spread(40.0, 50.0) is False

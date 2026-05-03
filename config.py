@@ -61,6 +61,8 @@ class Config:
             os.getenv("URGENT_MAX_UNFAVORABLE_SPREAD_PCT", "0.15")
         )
         self.ENTER_FAVORABLE_TIMEOUT = int(os.getenv("ENTER_FAVORABLE_TIMEOUT", "1800"))
+        self.MIN_FUNDING_SPREAD = float(os.getenv("MIN_FUNDING_SPREAD", "0.0005"))
+        self.ANALYZE_TIMEOUT = int(os.getenv("ANALYZE_TIMEOUT", "600"))
 
         # ===== 모니터링 및 안전 설정 =====
         self.POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "3"))  # 초

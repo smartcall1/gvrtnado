@@ -5,10 +5,11 @@ def normalize_funding_to_8h(rate: float, period_hours: int) -> float:
     return rate * (8 / period_hours)
 
 
-def decide_direction(nado_8h: float, grvt_8h: float) -> Optional[str]:
+def decide_direction(nado_8h: float, grvt_8h: float, min_spread: float = 0.0005) -> Optional[str]:
     net_a = grvt_8h - nado_8h
     net_b = nado_8h - grvt_8h
-    if net_a <= 0 and net_b <= 0:
+    best = max(net_a, net_b)
+    if best <= 0 or best < min_spread:
         return None
     return "A" if net_a >= net_b else "B"
 
