@@ -332,13 +332,15 @@ class DeltaNeutralBot:
                 result = await self._execute_enter(pair, direction, reduced)
                 notional = reduced
 
+        if result == "orphan":
+            # _execute_enter 내부에서 이미 MANUAL_INTERVENTION 전환 + _save_state() 완료
+            return
+
         if result == "ok":
             self._state.cycle_id = str(uuid.uuid4())[:8]
             self._state.entered_at = time.time()
             self._state.target_notional = notional
             self._state.cumulative_funding = 0.0
-            # 진입 직후엔 NADO 진입 측 추정만(maker) 잡고, GRVT는 다음 잔고 폴링에서 API 실제값으로 갱신.
-            # 청산 시점에 NADO 라운드트립 + GRVT 실제 누적으로 재집계 (_handle_exit).
             self._state.cumulative_fees = notional * self.cfg.NADO_MAKER_FEE_BPS / 10_000
             self._last_funding_check = time.time()
             self._state.nado_balance = nado_bal
@@ -980,14 +982,26 @@ class DeltaNeutralBot:
                 await self._telegram.send_alert(
                     f"[🚨 NADO FAIL] {pair} chunk {i+1} → GRVT 롤백 시도"
                 )
-                rollback_ok = await self._grvt.close_position(
-                    pair, grvt_pos_side, grvt_filled, self.cfg.EMERGENCY_SLIPPAGE_PCT,
+                rollback_ok = await self._rollback_with_retry(
+                    self._grvt, pair, grvt_pos_side, grvt_filled,
                 )
                 if not rollback_ok:
-                    logger.critical(f"Chunk {i+1}: GRVT 롤백 실패")
-                    await self._telegram.send_alert(
-                        f"[🚨 ROLLBACK FAIL] GRVT {pair} 단방향 잔존 — 수동 확인"
+                    grvt_vwap = grvt_filled_price if grvt_filled_price else 0
+                    self._positions["grvt"] = Position(
+                        exchange="grvt", symbol=pair, side=grvt_pos_side,
+                        notional=grvt_filled * grvt_vwap if grvt_vwap else 0,
+                        entry_price=grvt_vwap,
+                        leverage=self.cfg.LEVERAGE,
+                        margin=(grvt_filled * grvt_vwap / self.cfg.LEVERAGE) if grvt_vwap else 0,
                     )
+                    self._state.cycle_state = CycleState.MANUAL_INTERVENTION
+                    self._state.exit_reason = "entry_rollback_fail"
+                    self._save_state()
+                    await self._telegram.send_alert(
+                        f"[🚨 ROLLBACK FAIL] GRVT {pair} {grvt_filled:.4f} 단방향 잔존\n"
+                        f"MANUAL_INTERVENTION 전환 — 수동 청산 필요"
+                    )
+                    return "orphan"
                 # NADO가 거부했으면 retry 무의미 (OI/health 이슈) — 페어 차단
                 break
 
@@ -1025,23 +1039,30 @@ class DeltaNeutralBot:
         elif nado_notional > 0 and grvt_notional == 0:
             logger.warning("Only NADO filled, GRVT empty — rolling back NADO")
             logger.info(f"Entry rollback: NADO close {pair} {nado_pos_side} qty={nado_filled_qty:.4f}")
-            rollback_ok = await self._nado.close_position(pair, nado_pos_side, nado_filled_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT)
+            rollback_ok = await self._rollback_with_retry(
+                self._nado, pair, nado_pos_side, nado_filled_qty,
+            )
             if not rollback_ok:
-                # Rollback failed — register the orphan so the next EXIT cycle keeps trying
                 nado_vwap = nado_filled_cost / nado_filled_qty if nado_filled_qty > 0 else 0
                 self._positions["nado"] = Position(
                     exchange="nado", symbol=pair, side=nado_pos_side,
                     notional=nado_notional, entry_price=nado_vwap,
                     leverage=self.cfg.LEVERAGE, margin=nado_notional / self.cfg.LEVERAGE,
                 )
-                logger.critical(f"NADO rollback failed — orphan position registered for retry")
+                logger.critical(f"NADO rollback failed — MANUAL_INTERVENTION 전환")
+                self._state.cycle_state = CycleState.MANUAL_INTERVENTION
+                self._state.exit_reason = "entry_rollback_fail"
+                self._save_state()
                 await self._telegram.send_alert(
-                    f"[🚨 ROLLBACK FAIL] NADO {pair} 단방향 잔존, 다음 EXIT cycle 재시도"
+                    f"[🚨 ROLLBACK FAIL] NADO {pair} 단방향 잔존\nMANUAL_INTERVENTION 전환"
                 )
+                return "orphan"
             return "failed"
         elif grvt_notional > 0 and nado_notional == 0:
             logger.warning("Only GRVT filled, NADO empty — rolling back GRVT")
-            rollback_ok = await self._grvt.close_position(pair, grvt_pos_side, grvt_filled_qty, self.cfg.EMERGENCY_SLIPPAGE_PCT)
+            rollback_ok = await self._rollback_with_retry(
+                self._grvt, pair, grvt_pos_side, grvt_filled_qty,
+            )
             if not rollback_ok:
                 grvt_vwap = grvt_filled_cost / grvt_filled_qty if grvt_filled_qty > 0 else 0
                 self._positions["grvt"] = Position(
@@ -1049,10 +1070,14 @@ class DeltaNeutralBot:
                     notional=grvt_notional, entry_price=grvt_vwap,
                     leverage=self.cfg.LEVERAGE, margin=grvt_notional / self.cfg.LEVERAGE,
                 )
-                logger.critical(f"GRVT rollback failed — orphan position registered for retry")
+                logger.critical(f"GRVT rollback failed — MANUAL_INTERVENTION 전환")
+                self._state.cycle_state = CycleState.MANUAL_INTERVENTION
+                self._state.exit_reason = "entry_rollback_fail"
+                self._save_state()
                 await self._telegram.send_alert(
-                    f"[🚨 ROLLBACK FAIL] GRVT {pair} 단방향 잔존, 다음 EXIT cycle 재시도"
+                    f"[🚨 ROLLBACK FAIL] GRVT {pair} 단방향 잔존\nMANUAL_INTERVENTION 전환"
                 )
+                return "orphan"
             return "nado_max_oi" if nado_oi_fail else "nado_health" if nado_health_fail else "failed"
 
         if nado_notional > 0 and grvt_notional > 0:
@@ -1110,6 +1135,47 @@ class DeltaNeutralBot:
 
             return "ok"
         return "nado_max_oi" if nado_oi_fail else "nado_health" if nado_health_fail else "failed"
+
+    async def _rollback_with_retry(
+        self, client, pair: str, side: str, qty: float,
+        max_retries: int = 3,
+    ) -> bool:
+        """편측 롤백 — 슬리피지 단계적 확대하며 재시도. 거래소가 살아있으면 반드시 닫는다."""
+        slippages = [
+            self.cfg.EMERGENCY_SLIPPAGE_PCT,
+            self.cfg.EMERGENCY_SLIPPAGE_PCT * 2,
+            self.cfg.EMERGENCY_SLIPPAGE_PCT * 3,
+        ]
+        for attempt in range(max_retries):
+            slip = slippages[min(attempt, len(slippages) - 1)]
+            try:
+                real_pos = await client.get_positions(pair)
+                if real_pos:
+                    real_qty = abs(float(
+                        real_pos[0].get("size", real_pos[0].get("amount", real_pos[0].get("contracts", 0)))
+                    ))
+                    if real_qty < qty * 0.02:
+                        logger.info(f"Rollback: 이미 청산됨 (잔량 {real_qty:.6f})")
+                        return True
+                    qty = real_qty
+                elif attempt > 0:
+                    logger.info(f"Rollback: 포지션 없음 — 이전 시도에서 청산된 듯")
+                    return True
+
+                ok = await client.close_position(pair, side, qty, slip)
+                if ok:
+                    logger.info(f"Rollback 성공 (시도 {attempt+1}, slippage={slip:.1%})")
+                    return True
+                logger.warning(f"Rollback 실패 (시도 {attempt+1}/{max_retries}, slippage={slip:.1%})")
+            except Exception as e:
+                logger.error(f"Rollback 예외 (시도 {attempt+1}): {e}")
+            await asyncio.sleep(3 * (attempt + 1))
+
+        logger.critical(f"Rollback {max_retries}회 모두 실패: {pair} {side} {qty:.4f}")
+        await self._telegram.send_alert(
+            f"[🚨 ROLLBACK {max_retries}x FAIL] {pair} {side} {qty:.4f} — 청산 불가"
+        )
+        return False
 
     async def _grvt_open_with_xemm(
         self, pair: str, side: str, qty: float,
@@ -1573,7 +1639,7 @@ class DeltaNeutralBot:
 
     async def _recovery_check(self):
         pair = self._state.pair or self.cfg.PAIR_DEFAULT
-        if self._state.cycle_state not in (CycleState.HOLD, CycleState.ENTER, CycleState.EXIT):
+        if self._state.cycle_state == CycleState.MANUAL_INTERVENTION:
             return
 
         nado_pos = await self._nado.get_positions_strict(pair)
@@ -1645,8 +1711,43 @@ class DeltaNeutralBot:
             self._save_state()
             logger.info("Recovery: no positions found, resetting to IDLE")
         else:
-            logger.warning("Recovery: one-sided position detected!")
-            await self._telegram.send_alert("[⚠️ RECOVERY] 한쪽만 포지션 존재 — 수동 확인 필요")
+            orphan_exchange = "GRVT" if grvt_pos and not nado_pos else "NADO"
+            orphan_data = grvt_pos[0] if grvt_pos else nado_pos[0]
+            orphan_side = (orphan_data.get("side") or "LONG").upper()
+            orphan_size = abs(float(orphan_data.get("size", orphan_data.get("amount", orphan_data.get("contracts", 0)))))
+            orphan_price = await (self._grvt if grvt_pos else self._nado).get_mark_price(pair) or 0
+            orphan_notional = orphan_size * orphan_price
+
+            logger.critical(
+                f"Recovery: {orphan_exchange} 편측 포지션 감지! "
+                f"{pair} {orphan_side} {orphan_size:.4f} (${orphan_notional:,.0f})"
+            )
+            await self._telegram.send_alert(
+                f"[🚨 ORPHAN] {orphan_exchange} {pair} {orphan_side} {orphan_size:.4f} "
+                f"(${orphan_notional:,.0f}) 편측 감지 — 자동 청산 시도"
+            )
+
+            client = self._grvt if grvt_pos else self._nado
+            close_ok = await client.close_position(
+                pair, orphan_side, orphan_size, self.cfg.EMERGENCY_SLIPPAGE_PCT,
+            )
+            if close_ok:
+                logger.info(f"Recovery: {orphan_exchange} orphan 청산 성공")
+                self._positions.clear()
+                self._state.cycle_state = CycleState.COOLDOWN
+                self._state.cooldown_until = time.time() + 60
+                self._save_state()
+                await self._telegram.send_alert(
+                    f"[✅ ORPHAN CLOSED] {orphan_exchange} {pair} 편측 청산 완료 → COOLDOWN"
+                )
+            else:
+                logger.critical(f"Recovery: {orphan_exchange} orphan 청산 실패 — MANUAL_INTERVENTION")
+                self._state.cycle_state = CycleState.MANUAL_INTERVENTION
+                self._state.exit_reason = "orphan_recovery_fail"
+                self._save_state()
+                await self._telegram.send_alert(
+                    f"[⛔ ORPHAN FAIL] {orphan_exchange} {pair} 편측 청산 실패\n수동 청산 필요"
+                )
 
     # --- Telegram 핸들러 ---
 
