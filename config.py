@@ -62,6 +62,7 @@ class Config:
         )
         self.ENTER_FAVORABLE_TIMEOUT = int(os.getenv("ENTER_FAVORABLE_TIMEOUT", "1800"))
         self.MIN_FUNDING_SPREAD = float(os.getenv("MIN_FUNDING_SPREAD", "0.0005"))
+        self.MIN_FUNDING_SPREAD_VOLUME = float(os.getenv("MIN_FUNDING_SPREAD_VOLUME", "0.0001"))
         self.ANALYZE_TIMEOUT = int(os.getenv("ANALYZE_TIMEOUT", "600"))
 
         # ===== 모니터링 및 안전 설정 =====

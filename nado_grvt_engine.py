@@ -201,17 +201,27 @@ class DeltaNeutralBot:
 
         nado_8h = normalize_funding_to_8h(nado_rate, self.cfg.NADO_FUNDING_PERIOD_H)
         grvt_8h = normalize_funding_to_8h(grvt_rate, self.cfg.GRVT_FUNDING_PERIOD_H)
-        direction = decide_direction(nado_8h, grvt_8h, self.cfg.MIN_FUNDING_SPREAD)
-        logger.info(f"[ANALYZE] {pair} NADO_8h={nado_8h:.6f} GRVT_8h={grvt_8h:.6f} spread={abs(nado_8h - grvt_8h):.6f} dir={direction}")
+        mode = self._state.mode
+        min_spread = self.cfg.MIN_FUNDING_SPREAD
+        if mode in (OperatingMode.VOLUME, OperatingMode.VOLUME_URGENT):
+            min_spread = self.cfg.MIN_FUNDING_SPREAD_VOLUME
+        direction = decide_direction(nado_8h, grvt_8h, min_spread)
+        logger.info(f"[ANALYZE] {pair} NADO_8h={nado_8h:.6f} GRVT_8h={grvt_8h:.6f} spread={abs(nado_8h - grvt_8h):.6f} dir={direction} (min={min_spread:.6f})")
 
         if direction is None:
-            mode = self._state.mode
             if mode == OperatingMode.VOLUME_URGENT:
                 elapsed = time.time() - self._idle_since if self._idle_since else 0
                 if elapsed > 7200 and (nado_8h != 0 or grvt_8h != 0):
                     direction = "A" if grvt_8h >= nado_8h else "B"
                     logger.info(f"VOLUME_URGENT: 스프레드 미세, direction={direction} 강제 진입")
             if direction is None:
+                spread = abs(nado_8h - grvt_8h)
+                if spread < min_spread * 0.5:
+                    logger.info(f"[ANALYZE] {pair} spread {spread:.6f} < 임계값 절반 — 즉시 IDLE (다른 페어 탐색)")
+                    self._idle_since = 0.0
+                    self._state.cycle_state = CycleState.IDLE
+                    self._save_state()
+                    return
                 if not self._idle_since:
                     self._idle_since = time.time()
                 elif time.time() - self._idle_since > self.cfg.ANALYZE_TIMEOUT:
