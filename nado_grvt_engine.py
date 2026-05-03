@@ -251,9 +251,10 @@ class DeltaNeutralBot:
             )
             return
 
-        favorable = is_entry_favorable(direction, self._nado_price, self._grvt_price)
+        mode = self._state.mode
+        tolerance = 0.002 if mode in (OperatingMode.VOLUME, OperatingMode.VOLUME_URGENT) else 0.0
+        favorable = is_entry_favorable(direction, self._nado_price, self._grvt_price, tolerance)
         if not favorable:
-            mode = self._state.mode
             if mode != OperatingMode.VOLUME_URGENT:
                 wait_elapsed = time.time() - self._enter_since if self._enter_since else 0
                 if wait_elapsed > self.cfg.ENTER_FAVORABLE_TIMEOUT:
@@ -294,7 +295,8 @@ class DeltaNeutralBot:
                 return
             logger.info(f"[ENTER] VOLUME_URGENT bypass! {pair} dir={direction} spread={spread_pct:+.3f}% — 강제 진입")
         else:
-            logger.info(f"[ENTER] {pair} dir={direction} NADO=${self._nado_price:.1f} GRVT=${self._grvt_price:.1f} favorable=True — 진입")
+            spread_pct = (self._nado_price - self._grvt_price) / self._grvt_price * 100
+            logger.info(f"[ENTER] {pair} dir={direction} NADO=${self._nado_price:.1f} GRVT=${self._grvt_price:.1f} spread={spread_pct:+.3f}% favorable=True (tol={tolerance:.1%}) — 진입")
 
         nado_bal = await self._nado.get_balance()
         grvt_bal = await self._grvt.get_balance()

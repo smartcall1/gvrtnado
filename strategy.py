@@ -83,7 +83,8 @@ def determine_mode(
     return "VOLUME"
 
 
-def is_entry_favorable(direction: str, nado_price: float, grvt_price: float) -> bool:
+def is_entry_favorable(direction: str, nado_price: float, grvt_price: float,
+                       tolerance_pct: float = 0.0) -> bool:
     if direction == "A":
-        return nado_price <= grvt_price
-    return nado_price >= grvt_price
+        return nado_price <= grvt_price * (1 + tolerance_pct)
+    return nado_price >= grvt_price * (1 - tolerance_pct)
