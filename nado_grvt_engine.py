@@ -258,6 +258,7 @@ class DeltaNeutralBot:
                         f"[⏰ ENTER TIMEOUT] {pair} {wait_elapsed/60:.0f}분 favorable 미충족 → IDLE"
                     )
                     self._state.cycle_state = CycleState.IDLE
+                    self._enter_since = 0.0
                     self._save_state()
                     return
                 logger.info(f"[ENTER] {pair} dir={direction} NADO=${self._nado_price:.1f} GRVT=${self._grvt_price:.1f} favorable=False — waiting")
