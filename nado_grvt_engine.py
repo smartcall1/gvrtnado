@@ -249,6 +249,17 @@ class DeltaNeutralBot:
         if not favorable:
             mode = self._state.mode
             if mode != OperatingMode.VOLUME_URGENT:
+                wait_elapsed = time.time() - self._enter_since if self._enter_since else 0
+                if wait_elapsed > self.cfg.ENTER_FAVORABLE_TIMEOUT:
+                    logger.warning(
+                        f"[ENTER] {pair} favorable 대기 {wait_elapsed/60:.0f}분 초과 — IDLE 복귀"
+                    )
+                    await self._telegram.send_alert(
+                        f"[⏰ ENTER TIMEOUT] {pair} {wait_elapsed/60:.0f}분 favorable 미충족 → IDLE"
+                    )
+                    self._state.cycle_state = CycleState.IDLE
+                    self._save_state()
+                    return
                 logger.info(f"[ENTER] {pair} dir={direction} NADO=${self._nado_price:.1f} GRVT=${self._grvt_price:.1f} favorable=False — waiting")
                 return
             elapsed = time.time() - self._enter_since if self._enter_since else 0

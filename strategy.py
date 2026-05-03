@@ -84,5 +84,5 @@ def determine_mode(
 
 def is_entry_favorable(direction: str, nado_price: float, grvt_price: float) -> bool:
     if direction == "A":
-        return nado_price < grvt_price
-    return nado_price > grvt_price
+        return nado_price <= grvt_price
+    return nado_price >= grvt_price
