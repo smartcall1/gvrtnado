@@ -416,11 +416,15 @@ class DeltaNeutralBot:
         # 실잔고 미초기화(복구 등)면 spread_mtm으로 대체
         pnl_for_exit = real_pnl if real_pnl is not None else spread_mtm
 
+        pair = self._state.pair
         # 손절: 즉시 (모든 모드)
         if pnl_for_exit <= self.cfg.SPREAD_STOPLOSS:
             self._state.cycle_state = CycleState.EXIT
             self._state.exit_reason = "spread_stoploss"
             self._save_state()
+            await self._telegram.send_alert(
+                f"[🔔 EXIT 결정] {pair} | spread_stoploss | PnL: ${pnl_for_exit:+.2f}"
+            )
             return
 
         hold_hours = (time.time() - self._state.entered_at) / 3600
@@ -431,6 +435,9 @@ class DeltaNeutralBot:
                 self._state.cycle_state = CycleState.EXIT
                 self._state.exit_reason = "spread_profit"
                 self._save_state()
+                await self._telegram.send_alert(
+                    f"[🔔 EXIT 결정] {pair} | spread_profit | PnL: ${pnl_for_exit:+.2f}"
+                )
                 return
             # 2) URGENT 모드: real_pnl ≥ URGENT_BREAK_EVEN_THRESHOLD (기본 +$1) 청산
             # 단, baseline이 진짜 진입 시점일 때만 (fallback baseline은 확정 손실 회피 위해 차단)
@@ -444,6 +451,9 @@ class DeltaNeutralBot:
                 self._state.cycle_state = CycleState.EXIT
                 self._state.exit_reason = "break_even"
                 self._save_state()
+                await self._telegram.send_alert(
+                    f"[🔔 EXIT 결정] {pair} | break_even | PnL: ${real_pnl:+.2f}"
+                )
                 return
 
         worst_margin = 100.0
@@ -465,6 +475,9 @@ class DeltaNeutralBot:
             self._state.cycle_state = CycleState.EXIT
             self._state.exit_reason = exit_reason
             self._save_state()
+            await self._telegram.send_alert(
+                f"[🔔 EXIT 결정] {pair} | {exit_reason} | PnL: ${pnl_for_exit:+.2f}"
+            )
             return
 
         now = time.time()
