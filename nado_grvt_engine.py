@@ -611,8 +611,9 @@ class DeltaNeutralBot:
             logger.warning(f"[TOPUP] GRVT maker 실패 — 다음 시도까지 5분 대기")
             return
 
+        matched_nado_qty = grvt_filled * grvt_price / self._nado_price if self._nado_price else nado_qty
         nado_res = await self._nado.place_limit_order(
-            pair, nado_side, nado_qty, nado_taker_price, isolated_margin=nado_margin,
+            pair, nado_side, matched_nado_qty, nado_taker_price, isolated_margin=nado_margin,
         )
         if nado_res.status not in ("filled", "matched"):
             logger.error(f"[TOPUP] NADO taker 실패 ({nado_res.message}) — GRVT 롤백")
@@ -960,9 +961,10 @@ class DeltaNeutralBot:
                         await asyncio.sleep(5)
                     continue
 
-                # GRVT 체결 → NADO taker 즉시
+                # GRVT 체결 → NADO taker 즉시 (GRVT 실측 기준 매칭)
+                matched_nado_qty = grvt_filled * grvt_filled_price / nado_price if nado_price else nado_qty
                 nado_res = await self._nado.place_limit_order(
-                    pair, nado_side, nado_qty, nado_taker_price,
+                    pair, nado_side, matched_nado_qty, nado_taker_price,
                     isolated_margin=nado_margin,
                 )
                 nado_ok = nado_res.status in ("filled", "matched")
