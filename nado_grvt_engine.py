@@ -258,11 +258,12 @@ class DeltaNeutralBot:
                 wait_elapsed = time.time() - self._enter_since if self._enter_since else 0
                 if wait_elapsed > self.cfg.ENTER_FAVORABLE_TIMEOUT:
                     logger.warning(
-                        f"[ENTER] {pair} favorable 대기 {wait_elapsed/60:.0f}분 초과 — IDLE 복귀"
+                        f"[ENTER] {pair} favorable 대기 {wait_elapsed/60:.0f}분 초과 — IDLE 복귀, 30분 차단"
                     )
                     await self._telegram.send_alert(
-                        f"[⏰ ENTER TIMEOUT] {pair} {wait_elapsed/60:.0f}분 favorable 미충족 → IDLE"
+                        f"[⏰ ENTER TIMEOUT] {pair} {wait_elapsed/60:.0f}분 favorable 미충족 → IDLE (30분 차단)"
                     )
+                    self._oi_blocked[pair] = time.time() + 1800
                     self._state.cycle_state = CycleState.IDLE
                     self._enter_since = 0.0
                     self._save_state()
