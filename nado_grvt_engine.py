@@ -1727,32 +1727,14 @@ class DeltaNeutralBot:
                 f"Recovery: {orphan_exchange} 편측 포지션 감지! "
                 f"{pair} {orphan_side} {orphan_size:.4f} (${orphan_notional:,.0f})"
             )
+            self._state.cycle_state = CycleState.MANUAL_INTERVENTION
+            self._state.exit_reason = "orphan_detected"
+            self._save_state()
             await self._telegram.send_alert(
                 f"[🚨 ORPHAN] {orphan_exchange} {pair} {orphan_side} {orphan_size:.4f} "
-                f"(${orphan_notional:,.0f}) 편측 감지 — 자동 청산 시도"
+                f"(${orphan_notional:,.0f}) 편측 감지\n"
+                f"⚠️ 자동 청산 안 함 — 수동 확인 필요 (반대쪽 API 빈 응답 가능성)"
             )
-
-            client = self._grvt if grvt_pos else self._nado
-            close_ok = await client.close_position(
-                pair, orphan_side, orphan_size, self.cfg.EMERGENCY_SLIPPAGE_PCT,
-            )
-            if close_ok:
-                logger.info(f"Recovery: {orphan_exchange} orphan 청산 성공")
-                self._positions.clear()
-                self._state.cycle_state = CycleState.COOLDOWN
-                self._state.cooldown_until = time.time() + 60
-                self._save_state()
-                await self._telegram.send_alert(
-                    f"[✅ ORPHAN CLOSED] {orphan_exchange} {pair} 편측 청산 완료 → COOLDOWN"
-                )
-            else:
-                logger.critical(f"Recovery: {orphan_exchange} orphan 청산 실패 — MANUAL_INTERVENTION")
-                self._state.cycle_state = CycleState.MANUAL_INTERVENTION
-                self._state.exit_reason = "orphan_recovery_fail"
-                self._save_state()
-                await self._telegram.send_alert(
-                    f"[⛔ ORPHAN FAIL] {orphan_exchange} {pair} 편측 청산 실패\n수동 청산 필요"
-                )
 
     # --- Telegram 핸들러 ---
 
