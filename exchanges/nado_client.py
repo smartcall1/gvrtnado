@@ -173,29 +173,77 @@ class NadoClient(BaseExchangeClient):
             logger.error(f"NADO get_balance: {e}")
         return 0.0
 
+    def _parse_perp_balance(self, pb) -> Optional[dict]:
+        amount = int(pb.balance.amount) / 1e18
+        if abs(amount) <= 0:
+            return None
+        entry_price = 0.0
+        try:
+            vqb = getattr(pb.balance, 'v_quote_balance', None)
+            if vqb is None:
+                vqb = getattr(pb.balance, 'vQuoteBalance', None)
+            if vqb is not None and abs(amount) > 0:
+                entry_price = abs(int(vqb) / 1e18 / amount)
+        except Exception:
+            pass
+        return {
+            "side": "LONG" if amount > 0 else "SHORT",
+            "size": abs(amount),
+            "entry_price": entry_price,
+            "notional": abs(amount) * entry_price if entry_price > 0 else 0,
+        }
+
     def _parse_positions(self, info, product_id: int) -> list[dict]:
         positions = []
         for pb in info.perp_balances:
             if pb.product_id != product_id:
                 continue
-            amount = int(pb.balance.amount) / 1e18
-            if abs(amount) > 0:
-                entry_price = 0.0
-                try:
-                    vqb = getattr(pb.balance, 'v_quote_balance', None)
-                    if vqb is None:
-                        vqb = getattr(pb.balance, 'vQuoteBalance', None)
-                    if vqb is not None and abs(amount) > 0:
-                        entry_price = abs(int(vqb) / 1e18 / amount)
-                except Exception:
-                    pass
-                positions.append({
-                    "side": "LONG" if amount > 0 else "SHORT",
-                    "size": abs(amount),
-                    "entry_price": entry_price,
-                    "notional": abs(amount) * entry_price if entry_price > 0 else 0,
-                })
+            parsed = self._parse_perp_balance(pb)
+            if parsed:
+                positions.append(parsed)
         return positions
+
+    async def _get_isolated_positions(self, product_id: int) -> list[dict]:
+        try:
+            iso_data = await asyncio.to_thread(
+                self._client.market.get_isolated_positions,
+                self._subaccount_hex,
+            )
+            if not iso_data or not iso_data.isolated_positions:
+                return []
+            positions = []
+            for iso_pos in iso_data.isolated_positions:
+                bb = iso_pos.base_balance
+                if bb.product_id != product_id:
+                    continue
+                parsed = self._parse_perp_balance(bb)
+                if parsed:
+                    positions.append(parsed)
+            return positions
+        except Exception as e:
+            logger.debug(f"NADO _get_isolated_positions: {e}")
+            return []
+
+    async def _get_isolated_positions_strict(self, product_id: int) -> Optional[list[dict]]:
+        try:
+            iso_data = await asyncio.to_thread(
+                self._client.market.get_isolated_positions,
+                self._subaccount_hex,
+            )
+            if not iso_data or not iso_data.isolated_positions:
+                return []
+            positions = []
+            for iso_pos in iso_data.isolated_positions:
+                bb = iso_pos.base_balance
+                if bb.product_id != product_id:
+                    continue
+                parsed = self._parse_perp_balance(bb)
+                if parsed:
+                    positions.append(parsed)
+            return positions
+        except Exception as e:
+            logger.error(f"NADO _get_isolated_positions_strict FAILED: {e}")
+            return None
 
     async def get_positions(self, symbol: str) -> list[dict]:
         try:
@@ -204,9 +252,10 @@ class NadoClient(BaseExchangeClient):
                 self._client.subaccount.get_engine_subaccount_summary,
                 self._subaccount_hex,
             )
-            if not info:
-                return []
-            return self._parse_positions(info, product_id)
+            positions = self._parse_positions(info, product_id) if info else []
+            iso = await self._get_isolated_positions(product_id)
+            positions.extend(iso)
+            return positions
         except Exception as e:
             logger.error(f"NADO get_positions: {e}")
         return []
@@ -219,9 +268,12 @@ class NadoClient(BaseExchangeClient):
                 self._client.subaccount.get_engine_subaccount_summary,
                 self._subaccount_hex,
             )
-            if not info:
-                return []
-            return self._parse_positions(info, product_id)
+            cross = self._parse_positions(info, product_id) if info else []
+            iso = await self._get_isolated_positions_strict(product_id)
+            if iso is None:
+                return None
+            cross.extend(iso)
+            return cross
         except Exception as e:
             logger.error(f"NADO get_positions_strict FAILED (returning None): {e}")
             return None
