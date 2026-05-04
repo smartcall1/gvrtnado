@@ -1878,13 +1878,9 @@ class DeltaNeutralBot:
                 lines.append(f"   N {nado_pos.side:5} ${nado_pos.notional:,.0f}  {nado_chg:+.2f}%")
                 lines.append(f"   G {grvt_pos.side:5} ${grvt_pos.notional:,.0f}  {grvt_chg:+.2f}%")
 
-                worst_margin = 100.0
-                for pos in self._positions.values():
-                    price = self._nado_price if pos.exchange == "nado" else self._grvt_price
-                    if price:
-                        ratio = pos.calc_margin_ratio(price)
-                        worst_margin = min(worst_margin, ratio)
-                lines.append(f"🏦 마진 {worst_margin:.0f}%")
+                n_margin = nado_pos.calc_margin_ratio(self._nado_price) if self._nado_price else 100.0
+                g_margin = grvt_pos.calc_margin_ratio(self._grvt_price) if self._grvt_price else 100.0
+                lines.append(f"🏦 마진 N{n_margin:.0f}% / G{g_margin:.0f}%")
 
                 lines.append(SUB)
                 try:
