@@ -46,7 +46,7 @@ class Config:
 
         # ===== 손절/익절 설정 =====
         self.SPREAD_EXIT_HOLD = float(os.getenv("SPREAD_EXIT_HOLD", "50"))  # USD
-        self.SPREAD_STOPLOSS = float(os.getenv("SPREAD_STOPLOSS", "-100"))  # USD
+        self.SPREAD_STOPLOSS = float(os.getenv("SPREAD_STOPLOSS", "-80"))  # USD
         self.MAX_HOLD_DAYS = int(os.getenv("MAX_HOLD_DAYS", "4"))
         # URGENT break-even 임계값 — 청산 슬리피지 흡수용.
         # 기본 2: 포인트 파밍 우선 전략 — 수수료 회수 즉시 청산, volume 회전 극대화
