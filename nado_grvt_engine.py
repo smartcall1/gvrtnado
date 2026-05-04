@@ -1812,10 +1812,19 @@ class DeltaNeutralBot:
                 boost_str = f" [N{boost['nado']:.1f}× G{boost['grvt']:.1f}×]"
 
             DIV = "━━━━━━━━━━━━━━━━"
+            SUB = "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
 
-            # === 헤더 + 모드 + 구분선 ===
+            mp = self.cfg.mode_params(mode)
+            min_hold_sec = mp["min_hold_hours"] * 3600
+            min_remaining = max(0, min_hold_sec - hold_seconds) if hold_seconds > 0 else min_hold_sec
+            if min_remaining <= 0:
+                badge = "✅"
+            else:
+                mr_h = min_remaining / 3600
+                badge = f"⏰{mr_h:.1f}h남음" if mr_h >= 1 else f"⏰{int(min_remaining/60)}m남음"
+
             lines = [
-                f"📊 <b>{cycle}</b> · {pair}{hold_str}",
+                f"📊 <b>#{self._state.cycle_id} {cycle}</b> · {pair}{hold_str} {badge}",
                 f"🎯 {mode}{boost_str}",
                 DIV,
             ]
@@ -1831,21 +1840,19 @@ class DeltaNeutralBot:
                 nado_chg = ((nado_curr - nado_pos.entry_price) / nado_pos.entry_price * 100) if nado_pos.entry_price > 0 else 0
                 grvt_chg = ((grvt_curr - grvt_pos.entry_price) / grvt_pos.entry_price * 100) if grvt_pos.entry_price > 0 else 0
 
-                # === 잔고 + PnL ===
                 real_pnl = None
                 if self._state.entry_total_balance > 0:
                     real_pnl = total_bal - self._state.entry_total_balance
 
                 if real_pnl is not None:
                     pnl_emoji = "🟢" if real_pnl >= 0 else "🔴"
-                    lines.append(f"💰 <b>${total_bal:,.0f}</b> {pnl_emoji} <b>${real_pnl:+,.2f}</b>")
+                    pct = real_pnl / self._state.entry_total_balance * 100
+                    lines.append(f"💰 <b>${total_bal:,.0f}</b> {pnl_emoji} <b>${real_pnl:+,.2f}</b> ({pct:+.2f}%)")
                     lines.append(f"   <i>(N ${nado_bal:,.2f} / G ${grvt_bal:,.2f})</i>")
                     baseline_warn = "" if self._state.entry_baseline_real else " [⚠️ baseline 임시]"
                     lines.append(f"   진입 ${self._state.entry_total_balance:,.0f}{baseline_warn}")
 
-                    # 익절/손절 트리거
                     urgent_th = self.cfg.URGENT_BREAK_EVEN_THRESHOLD
-                    mp = self.cfg.mode_params(mode)
                     profit_th = mp['spread_exit']
                     sl_str = f"📐 손절 -${abs(self.cfg.SPREAD_STOPLOSS):.0f}"
                     if mode == "VOLUME_URGENT" and self._state.entry_baseline_real:
@@ -1854,7 +1861,7 @@ class DeltaNeutralBot:
                             lines.append(f"   ⚡ 본전까지 <b>${need:,.2f}</b> / {sl_str}")
                         elif real_pnl < profit_th:
                             need = profit_th - real_pnl
-                            lines.append(f"   ⚡ 본전 ✓ · 익절까지 <b>${need:,.2f}</b> / {sl_str}")
+                            lines.append(f"   🎯 익절까지 <b>${need:,.2f}</b> / {sl_str}")
                         else:
                             lines.append(f"   🎯 익절 도달 / {sl_str}")
                     else:
@@ -1866,13 +1873,20 @@ class DeltaNeutralBot:
                 else:
                     lines.append(f"💰 <b>${total_bal:,.0f}</b> ⚠️ baseline 없음")
 
-                # === 헷지 포지션 ===
-                lines.append("")
+                lines.append(SUB)
                 lines.append(f"📍 헷지 {delta_emoji}")
                 lines.append(f"   N {nado_pos.side:5} ${nado_pos.notional:,.0f}  {nado_chg:+.2f}%")
                 lines.append(f"   G {grvt_pos.side:5} ${grvt_pos.notional:,.0f}  {grvt_chg:+.2f}%")
 
-                # === 펀딩 APR ===
+                worst_margin = 100.0
+                for pos in self._positions.values():
+                    price = self._nado_price if pos.exchange == "nado" else self._grvt_price
+                    if price:
+                        ratio = pos.calc_margin_ratio(price)
+                        worst_margin = min(worst_margin, ratio)
+                lines.append(f"🏦 마진 {worst_margin:.0f}%")
+
+                lines.append(SUB)
                 try:
                     nr = await self._nado.get_funding_rate(pair)
                     gr = await self._grvt.get_funding_rate(pair)
@@ -1899,43 +1913,42 @@ class DeltaNeutralBot:
                             gh, gm = grvt_min // 60, grvt_min % 60
                             grvt_next_str = f"{gh}h{gm}m" if gh > 0 else f"{gm}m"
                             settle_str = f"N {nado_min}m / G {grvt_next_str}"
-                        lines.append("")
                         lines.append(f"📈 펀딩 APR {apr_emoji} <b>{apr:+.1f}%</b>")
                         lines.append(f"   정산 {settle_str}")
                         lines.append(f"   8h N {nado_8h:+.6f} / G {grvt_8h:+.6f}")
                 except Exception as e:
                     logger.debug(f"Status funding fetch: {e}")
 
-                # 누적 펀딩 + 수수료
                 cum_funding = self._state.cumulative_funding
                 cum_fees = self._state.cumulative_fees
                 lines.append(f"   누적 펀딩 ${cum_funding:+,.2f} · 수수료 ${cum_fees:,.2f}")
 
-                # === 자동만기 ===
+                lines.append(SUB)
                 try:
-                    mp = self.cfg.mode_params(mode)
                     max_remaining_h = max(0, self.cfg.MAX_HOLD_DAYS * 86400 - hold_seconds) / 3600
                     max_d = max_remaining_h / 24
                     max_str = f"{max_d:.1f}d" if max_remaining_h >= 24 else f"{max_remaining_h:.1f}h"
-                    min_remaining = max(0, mp['min_hold_hours'] * 3600 - hold_seconds)
-                    lines.append("")
                     if min_remaining > 0:
                         min_h = min_remaining / 3600
                         min_str = f"{min_h:.1f}h" if min_h >= 1 else f"{int(min_remaining/60)}m"
-                        lines.append(f"⏳ 최소 보유 {min_str} · 자동만기까지 {max_str}")
+                        lines.append(f"⏳ 최소 {min_str} · 만기 {max_str}")
                     else:
-                        lines.append(f"⏳ 자동만기까지 {max_str}")
+                        lines.append(f"⏳ 최소 ✅ · 만기 {max_str}")
                 except Exception:
                     pass
 
-                # === 누적 (realized) ===
+                lines.append(DIV)
+                try:
+                    hist = self._cycle_history
+                    cnt = len(hist)
+                    cum_pnl = sum(c.net_pnl for c in hist)
+                    cum_emoji = "🟢" if cum_pnl >= 0 else "🔴"
+                    lines.append(f"{cum_emoji} {cnt}건 누적 <b>${cum_pnl:+,.2f}</b>")
+                except Exception:
+                    pass
                 try:
                     days = self._earn.days_remaining(datetime.now(timezone.utc))
                     prog = self._earn.volume_progress() * 100
-                    t_emoji = "✅" if self._earn.is_trades_target_met() else "❌"
-                    v_emoji = "✅" if self._earn.is_volume_target_met() else "⏳"
-                    lines.append("")
-                    lines.append("━ 누적 (realized) ━")
                     lines.append(f"💎 거래 {self._earn.grvt_trades}/5 · {prog:.0f}% · {days}d")
                     lines.append(f"   <i>${self._earn.grvt_volume:,.0f} / ${self._earn.target_volume/1000:.0f}K</i>")
                 except Exception:
