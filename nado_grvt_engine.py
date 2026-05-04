@@ -28,7 +28,7 @@ from strategy import (
 )
 from pair_manager import PairManager
 from monitor import MarginLevel, check_margin_level, CircuitBreaker, check_price_divergence
-from telegram_ui import TelegramUI, BTN_STATUS, BTN_HISTORY, BTN_EARN, BTN_FUNDING, BTN_REBALANCE, BTN_STOP, BTN_CLOSE
+from telegram_ui import TelegramUI, BTN_STATUS, BTN_HISTORY, BTN_POSITIONS, BTN_FUNDING, BTN_CLOSE, BTN_STOP, BTN_KILL
 from exchanges.nado_client import NadoClient
 from exchanges.grvt_client import GrvtClient
 
@@ -80,6 +80,7 @@ class DeltaNeutralBot:
         self._suspended_alerted: bool = False
         # EXIT 상태 stuck 추적 (API 장애 등으로 청산 반복 실패 시 MANUAL 에스컬레이션)
         self._exit_stuck_since: float = 0.0
+        self._exit_lock = asyncio.Lock()
 
     def _init_earn(self) -> EarnState:
         if self._state.earn:
@@ -272,7 +273,7 @@ class DeltaNeutralBot:
                         f"[ENTER] {pair} favorable 대기 {wait_elapsed/60:.0f}분 초과 — IDLE 복귀, 30분 차단"
                     )
                     await self._telegram.send_alert(
-                        f"[⏰ ENTER TIMEOUT] {pair} {wait_elapsed/60:.0f}분 favorable 미충족 → IDLE (2시간 차단)"
+                        f"<b>[⏰ ENTER TIMEOUT]</b> {pair} {wait_elapsed/60:.0f}분 favorable 미충족 → IDLE (2시간 차단)"
                     )
                     self._oi_blocked[pair] = time.time() + 7200
                     self._state.cycle_state = CycleState.IDLE
@@ -297,7 +298,7 @@ class DeltaNeutralBot:
                     f"(불리 {unfavorable_pct:.3f}% > 임계 {self.cfg.URGENT_MAX_UNFAVORABLE_SPREAD_PCT}%) — 5분 차단"
                 )
                 await self._telegram.send_alert(
-                    f"[⚠️ SPREAD GUARD] {pair} 진입 spread {unfavorable_pct:+.2f}% 너무 불리 — 차단"
+                    f"<b>[⚠️ SPREAD GUARD]</b> {pair} 진입 spread {unfavorable_pct:+.2f}% 너무 불리 — 차단"
                 )
                 self._oi_blocked[pair] = time.time() + 300  # 5분 차단 (가격 수렴 대기)
                 self._state.cycle_state = CycleState.IDLE
@@ -333,7 +334,7 @@ class DeltaNeutralBot:
         if result == "nado_max_oi":
             self._oi_blocked[pair] = time.time() + 3600
             logger.warning(f"[ENTER] NADO {pair} max OI — 1시간 차단, 다음 마켓 탐색")
-            await self._telegram.send_alert(f"[⛔ MAX OI] NADO {pair} OI 한도 — 1h 차단, 다른 마켓 탐색")
+            await self._telegram.send_alert(f"<b>[⛔ MAX OI]</b> NADO {pair} OI 한도 — 1h 차단, 다른 마켓 탐색")
             self._state.cycle_state = CycleState.IDLE
             self._save_state()
             return
@@ -341,7 +342,7 @@ class DeltaNeutralBot:
             reduced = notional * 0.4
             if reduced >= self.cfg.MIN_NOTIONAL:
                 logger.info(f"[ENTER] NADO 마진 부족, notional ${notional:.0f} → ${reduced:.0f} 줄여 재시도")
-                await self._telegram.send_alert(f"[⚠️ MARGIN] NADO {pair} 마진 부족 — notional ${notional:.0f}→${reduced:.0f} 재시도")
+                await self._telegram.send_alert(f"<b>[⚠️ MARGIN]</b> NADO {pair} 마진 부족 — notional ${notional:.0f}→${reduced:.0f} 재시도")
                 result = await self._execute_enter(pair, direction, reduced)
                 notional = reduced
 
@@ -362,7 +363,7 @@ class DeltaNeutralBot:
             self._save_state()
 
             await self._telegram.send_alert(
-                f"[ENTER] {pair} | "
+                f"✅ <b>[ENTER #{self._state.cycle_id}]</b> {pair}\n"
                 f"NADO {'LONG' if direction == 'A' else 'SHORT'} / "
                 f"GRVT {'SHORT' if direction == 'A' else 'LONG'} | "
                 f"${notional:,.0f}"
@@ -397,7 +398,7 @@ class DeltaNeutralBot:
             self._state.cycle_state = CycleState.HOLD_SUSPENDED
             self._save_state()
             await self._telegram.send_alert(
-                f"[⚠️ API 장애] {'+'.join(tripped_exchanges)} 응답 없음\n"
+                f"<b>[⚠️ API 장애]</b> {'+'.join(tripped_exchanges)} 응답 없음\n"
                 f"포지션 유지, API 복구 대기 중..."
             )
             return
@@ -413,7 +414,7 @@ class DeltaNeutralBot:
             if div_level == "WARNING" and time.time() - self._last_margin_warn > 1800:
                 self._last_margin_warn = time.time()
                 await self._telegram.send_alert(
-                    f"[⚠️ DIVERGENCE] {self._nado_price:.1f} vs {self._grvt_price:.1f}"
+                    f"<b>[⚠️ DIVERGENCE]</b> {self._nado_price:.1f} vs {self._grvt_price:.1f}"
                 )
 
         nado_pnl = self._positions["nado"].calc_unrealized_pnl(self._nado_price) if "nado" in self._positions and self._nado_price else 0
@@ -456,7 +457,7 @@ class DeltaNeutralBot:
             self._state.exit_reason = "spread_stoploss"
             self._save_state()
             await self._telegram.send_alert(
-                f"[🔔 EXIT 결정] {pair} | spread_stoploss | PnL: ${pnl_for_exit:+.2f}"
+                f"<b>[🔔 EXIT 결정]</b> {pair} | spread_stoploss | PnL: ${pnl_for_exit:+.2f}"
             )
             return
 
@@ -469,7 +470,7 @@ class DeltaNeutralBot:
                 self._state.exit_reason = "spread_profit"
                 self._save_state()
                 await self._telegram.send_alert(
-                    f"[🔔 EXIT 결정] {pair} | spread_profit | PnL: ${pnl_for_exit:+.2f}"
+                    f"<b>[🔔 EXIT 결정]</b> {pair} | spread_profit | PnL: ${pnl_for_exit:+.2f}"
                 )
                 return
             # 2) URGENT 모드: real_pnl ≥ URGENT_BREAK_EVEN_THRESHOLD (기본 +$1) 청산
@@ -485,7 +486,7 @@ class DeltaNeutralBot:
                 self._state.exit_reason = "break_even"
                 self._save_state()
                 await self._telegram.send_alert(
-                    f"[🔔 EXIT 결정] {pair} | break_even | PnL: ${real_pnl:+.2f}"
+                    f"<b>[🔔 EXIT 결정]</b> {pair} | break_even | PnL: ${real_pnl:+.2f}"
                 )
                 return
 
@@ -498,7 +499,7 @@ class DeltaNeutralBot:
 
         if worst_margin <= self.cfg.MARGIN_WARNING_PCT and time.time() - self._last_margin_warn > 1800:
             self._last_margin_warn = time.time()
-            await self._telegram.send_alert(f"[⚠️ MARGIN] {worst_margin:.1f}%")
+            await self._telegram.send_alert(f"<b>[⚠️ MARGIN]</b> {worst_margin:.1f}%")
 
         exit_reason = should_exit_cycle(
             hold_hours, mode_params["min_hold_hours"],
@@ -509,7 +510,7 @@ class DeltaNeutralBot:
             self._state.exit_reason = exit_reason
             self._save_state()
             await self._telegram.send_alert(
-                f"[🔔 EXIT 결정] {pair} | {exit_reason} | PnL: ${pnl_for_exit:+.2f}"
+                f"<b>[🔔 EXIT 결정]</b> {pair} | {exit_reason} | PnL: ${pnl_for_exit:+.2f}"
             )
             return
 
@@ -544,7 +545,7 @@ class DeltaNeutralBot:
                     # Sanity: cumulative이 notional의 10배 초과면 corrupt → 리셋
                     if abs(self._state.cumulative_funding) > notional * 10:
                         logger.critical(f"cumulative_funding ${self._state.cumulative_funding:,.0f} corrupt, 0으로 리셋")
-                        await self._telegram.send_alert(f"[🚨 RESET] 손상된 누적 펀딩 (${self._state.cumulative_funding:,.0f}) 0으로 초기화")
+                        await self._telegram.send_alert(f"<b>[🚨 RESET]</b> 손상된 누적 펀딩 (${self._state.cumulative_funding:,.0f}) 0으로 초기화")
                         self._state.cumulative_funding = 0.0
                 self._log_jsonl("funding_history.jsonl", {
                     "pair": pair, "nado_rate": nado_rate, "grvt_rate": grvt_rate,
@@ -628,7 +629,7 @@ class DeltaNeutralBot:
         if nado_res.status not in ("filled", "matched"):
             logger.error(f"[TOPUP] NADO taker 실패 ({nado_res.message}) — GRVT 롤백")
             await self._grvt.close_position(pair, grvt_pos_side, grvt_filled, self.cfg.EMERGENCY_SLIPPAGE_PCT)
-            await self._telegram.send_alert(f"[TOPUP FAIL] NADO 실패 → GRVT 롤백 시도")
+            await self._telegram.send_alert(f"<b>[TOPUP FAIL]</b> NADO 실패 → GRVT 롤백 시도")
             return
 
         nado_cost = nado_res.filled_size * nado_res.filled_price
@@ -650,7 +651,7 @@ class DeltaNeutralBot:
         new_avg = sum(p.notional for p in self._positions.values()) / 2
         logger.info(f"[TOPUP] {pair} 증량 완료 ${avg_notional:.0f} → ${new_avg:.0f} / 목표 ${target:.0f}")
         await self._telegram.send_alert(
-            f"[TOPUP] {pair} ${avg_notional:.0f}→${new_avg:.0f} / 목표${target:.0f}"
+            f"<b>[TOPUP]</b> {pair} ${avg_notional:.0f}→${new_avg:.0f} / 목표${target:.0f}"
         )
 
     async def _handle_hold_suspended(self):
@@ -684,7 +685,7 @@ class DeltaNeutralBot:
             self._state.cycle_state = CycleState.HOLD
             self._save_state()
             await self._telegram.send_alert(
-                f"[✅ API 복구] {pair} HOLD 복귀 (중단 {elapsed:.0f}초)"
+                f"<b>[✅ API 복구]</b> {pair} HOLD 복귀 (중단 {elapsed:.0f}초)"
             )
             return
 
@@ -697,7 +698,7 @@ class DeltaNeutralBot:
             self._state.exit_reason = "api_prolonged_outage"
             self._save_state()
             await self._telegram.send_alert(
-                f"[🚨 장기 장애] {pair} API {elapsed/60:.0f}분 미복구\n"
+                f"<b>[🚨 장기 장애]</b> {pair} API {elapsed/60:.0f}분 미복구\n"
                 f"MANUAL_INTERVENTION 전환 — 수동 확인 필요\n"
                 f"NADO: {'✅' if nado_ok else '❌'} / GRVT: {'✅' if grvt_ok else '❌'}"
             )
@@ -711,7 +712,7 @@ class DeltaNeutralBot:
                 f"GRVT:{'OK' if grvt_ok else 'DOWN'}"
             )
             await self._telegram.send_alert(
-                f"[⚠️ 장애 지속] {pair} API {elapsed/60:.0f}분째 미복구\n"
+                f"<b>[⚠️ 장애 지속]</b> {pair} API {elapsed/60:.0f}분째 미복구\n"
                 f"NADO: {'✅' if nado_ok else '❌'} / GRVT: {'✅' if grvt_ok else '❌'}\n"
                 f"포지션 유지 중, {self.cfg.SUSPENDED_MANUAL_SECONDS//60}분 후 MANUAL 전환"
             )
@@ -737,12 +738,12 @@ class DeltaNeutralBot:
                 self._state.exit_reason = "exit_stuck"
                 self._save_state()
                 await self._telegram.send_alert(
-                    f"[⛔ EXIT STUCK] {pair} {elapsed/60:.0f}분째 청산 실패\n"
+                    f"<b>[⛔ EXIT STUCK]</b> {pair} {elapsed/60:.0f}분째 청산 실패\n"
                     f"MANUAL_INTERVENTION 전환 — 수동 청산 필요"
                 )
             else:
                 logger.warning(f"Exit failed ({elapsed:.0f}초째), will retry next tick")
-                await self._telegram.send_alert(f"[⚠️ EXIT RETRY] {pair} 청산 재시도 예정 ({elapsed:.0f}s)")
+                await self._telegram.send_alert(f"<b>[⚠️ EXIT RETRY]</b> {pair} 청산 재시도 예정 ({elapsed:.0f}s)")
                 self._save_state()
             return
 
@@ -819,8 +820,9 @@ class DeltaNeutralBot:
         self._state.cycle_state = CycleState.COOLDOWN
         self._save_state()
 
+        pnl_emoji = "🟢" if cycle.net_pnl >= 0 else "🔴"
         await self._telegram.send_alert(
-            f"[EXIT] {pair} | {exit_reason} | "
+            f"{pnl_emoji} <b>[EXIT #{cycle.cycle_id}]</b> {pair} | {exit_reason}\n"
             f"PnL: ${cycle.net_pnl:+.2f} | Vol: +${grvt_volume:,.0f}"
         )
 
@@ -829,7 +831,7 @@ class DeltaNeutralBot:
             if avg < -3:
                 self._state.mode = OperatingMode.HOLD
                 await self._telegram.send_alert(
-                    f"[⚠️ 적자 감지] 최근 5사이클 평균 ${avg:.1f}. HOLD 전환"
+                    f"<b>[⚠️ 적자 감지]</b> 최근 5사이클 평균 ${avg:.1f}. HOLD 전환"
                 )
 
     async def _handle_cooldown(self):
@@ -866,7 +868,7 @@ class DeltaNeutralBot:
             self._state.cycle_state = CycleState.COOLDOWN  # 60s 후 _handle_cooldown이 IDLE로 전환
             self._save_state()
             await self._telegram.send_alert(
-                f"[✅ MANUAL CLEAR] {pair} 수동 청산 감지 → 자동 거래 재개 (60s 쿨다운 후)"
+                f"<b>[✅ MANUAL CLEAR]</b> {pair} 수동 청산 감지 → 자동 거래 재개 (60s 쿨다운 후)"
             )
             return
 
@@ -875,9 +877,9 @@ class DeltaNeutralBot:
         if time.time() - last_reminder > 1800:
             self._manual_last_reminder = time.time()
             await self._telegram.send_alert(
-                f"[⛔ MANUAL] {pair} 봇 정지 중\n"
+                f"<b>[⛔ MANUAL]</b> {pair} 봇 정지 중\n"
                 f"잔여: NADO {nado_size:.6f} / GRVT {grvt_size:.6f}\n"
-                f"양쪽 모두 청산하시면 자동 IDLE 복귀."
+                f"양쪽 모두 청산하시면 자동 IDLE 복귀합니다."
             )
 
     # --- 청크 진입/퇴출 ---
@@ -886,7 +888,7 @@ class DeltaNeutralBot:
         lev_ok = await self._grvt.set_leverage(pair, self.cfg.LEVERAGE)
         if not lev_ok:
             await self._telegram.send_alert(
-                f"[⚠️ LEVERAGE] GRVT {pair} 레버리지를 {self.cfg.LEVERAGE}x로 웹UI에서 설정해주세요"
+                f"<b>[⚠️ LEVERAGE]</b> GRVT {pair} 레버리지를 {self.cfg.LEVERAGE}x로 웹UI에서 설정해주세요"
             )
             return "failed"
 
@@ -995,7 +997,7 @@ class DeltaNeutralBot:
                     nado_health_fail = True
                 logger.error(f"Chunk {i+1}: NADO taker 실패 ({msg}) → GRVT 응급 청산")
                 await self._telegram.send_alert(
-                    f"[🚨 NADO FAIL] {pair} chunk {i+1} → GRVT 롤백 시도"
+                    f"<b>[🚨 NADO FAIL]</b> {pair} chunk {i+1} → GRVT 롤백 시도"
                 )
                 rollback_ok = await self._rollback_with_retry(
                     self._grvt, pair, grvt_pos_side, grvt_filled,
@@ -1013,7 +1015,7 @@ class DeltaNeutralBot:
                     self._state.exit_reason = "entry_rollback_fail"
                     self._save_state()
                     await self._telegram.send_alert(
-                        f"[🚨 ROLLBACK FAIL] GRVT {pair} {grvt_filled:.4f} 단방향 잔존\n"
+                        f"<b>[🚨 ROLLBACK FAIL]</b> GRVT {pair} {grvt_filled:.4f} 단방향 잔존\n"
                         f"MANUAL_INTERVENTION 전환 — 수동 청산 필요"
                     )
                     return "orphan"
@@ -1039,7 +1041,7 @@ class DeltaNeutralBot:
             # Bug C 강화 (2026-04-27): 임계값 5% → 2% (delta_donemoji 사고 5.87% 케이스도 잡힘)
             if imbalance > 0.02:
                 logger.warning(f"Notional imbalance {imbalance:.1%}: NADO=${nado_notional:,.0f} GRVT=${grvt_notional:,.0f} — rolling back all")
-                await self._telegram.send_alert(f"[⚠️ IMBALANCE] {imbalance:.1%} — 전량 롤백")
+                await self._telegram.send_alert(f"<b>[⚠️ IMBALANCE]</b> {imbalance:.1%} — 전량 롤백")
                 await self._nado.cancel_all_orders(pair)
                 await self._grvt.cancel_all_orders(pair)
                 logger.info(
@@ -1069,7 +1071,7 @@ class DeltaNeutralBot:
                 self._state.exit_reason = "entry_rollback_fail"
                 self._save_state()
                 await self._telegram.send_alert(
-                    f"[🚨 ROLLBACK FAIL] NADO {pair} 단방향 잔존\nMANUAL_INTERVENTION 전환"
+                    f"<b>[🚨 ROLLBACK FAIL]</b> NADO {pair} 단방향 잔존\nMANUAL_INTERVENTION 전환"
                 )
                 return "orphan"
             return "failed"
@@ -1090,7 +1092,7 @@ class DeltaNeutralBot:
                 self._state.exit_reason = "entry_rollback_fail"
                 self._save_state()
                 await self._telegram.send_alert(
-                    f"[🚨 ROLLBACK FAIL] GRVT {pair} 단방향 잔존\nMANUAL_INTERVENTION 전환"
+                    f"<b>[🚨 ROLLBACK FAIL]</b> GRVT {pair} 단방향 잔존\nMANUAL_INTERVENTION 전환"
                 )
                 return "orphan"
             return "nado_max_oi" if nado_oi_fail else "nado_health" if nado_health_fail else "failed"
@@ -1141,7 +1143,7 @@ class DeltaNeutralBot:
                         if recon_res.status in ("filled", "matched"):
                             logger.info(f"[ENTRY RECON] 보정 성공 (시도 {recon_attempt+1}): +{shortfall:.4f}")
                             await self._telegram.send_alert(
-                                f"[✅ RECON] NADO {pair} +{shortfall:.4f} 보정 완료"
+                                f"<b>[✅ RECON]</b> NADO {pair} +{shortfall:.4f} 보정 완료"
                             )
                             break
                         logger.warning(f"[ENTRY RECON] 보정 실패 (시도 {recon_attempt+1}): {recon_res.message}")
@@ -1208,7 +1210,7 @@ class DeltaNeutralBot:
 
         logger.critical(f"Rollback {max_retries}회 모두 실패: {pair} {side} {qty:.4f}")
         await self._telegram.send_alert(
-            f"[🚨 ROLLBACK {max_retries}x FAIL] {pair} {side} {qty:.4f} — 청산 불가"
+            f"<b>[🚨 ROLLBACK {max_retries}x FAIL]</b> {pair} {side} {qty:.4f} — 청산 불가"
         )
         return False
 
@@ -1446,6 +1448,13 @@ class DeltaNeutralBot:
         return False
 
     async def _execute_exit(self, pair: str) -> bool:
+        if self._exit_lock.locked():
+            logger.warning("_execute_exit 이미 실행 중 — 중복 호출 무시")
+            return False
+        async with self._exit_lock:
+            return await self._execute_exit_inner(pair)
+
+    async def _execute_exit_inner(self, pair: str) -> bool:
         if not self._positions:
             return True
 
@@ -1581,7 +1590,7 @@ class DeltaNeutralBot:
                 if nado_dust or grvt_dust:
                     logger.info(f"Exit dust treated as closed: nado=${nado_notional:.2f}, grvt=${grvt_notional:.2f}")
                     await self._telegram.send_alert(
-                        f"[ℹ️ DUST] {pair} 잔존 dust (nado=${nado_notional:.2f}, grvt=${grvt_notional:.2f}) — 청산 완료로 처리"
+                        f"<b>[ℹ️ DUST]</b> {pair} 잔존 dust (nado=${nado_notional:.2f}, grvt=${grvt_notional:.2f}) — 청산 완료로 처리"
                     )
                 return True
 
@@ -1628,7 +1637,7 @@ class DeltaNeutralBot:
             self._state.cycle_state = CycleState.COOLDOWN
             self._state.cooldown_until = time.time() + 60
             self._save_state()
-            await self._telegram.send_alert(f"[🚨 EMERGENCY EXIT] {reason}")
+            await self._telegram.send_alert(f"<b>[🚨 EMERGENCY EXIT]</b> {reason}")
         else:
             # delta_donemoji_bot cycle 10 사건 회귀 방지: 청산 실패 후 COOLDOWN으로
             # 가버리면 60s 뒤 IDLE → 신규 사이클 진입 → 잔여 포지션 위에 직선 노출 누적.
@@ -1637,9 +1646,9 @@ class DeltaNeutralBot:
             self._state.cycle_state = CycleState.MANUAL_INTERVENTION
             self._save_state()
             await self._telegram.send_alert(
-                f"[⛔ EXIT FAILED] {pair} 수동 청산 필요!\n"
+                f"<b>[⛔ EXIT FAILED]</b> {pair} 수동 청산 필요!\n"
                 f"사유: {reason}\n"
-                f"양쪽 거래소 포지션을 수동으로 정리하시면 자동으로 IDLE 복귀."
+                f"양쪽 거래소 포지션을 수동으로 정리하시면 자동으로 IDLE 복귀합니다."
             )
 
     # --- Earn 관리 ---
@@ -1651,7 +1660,7 @@ class DeltaNeutralBot:
             self._state.mode = OperatingMode.VOLUME
             self._save_state()
             await self._telegram.send_alert(
-                f"[🔄 NEW CYCLE] {self._earn.cycle_start.date()} ~ {self._earn.cycle_end.date()}"
+                f"<b>[🔄 NEW CYCLE]</b> {self._earn.cycle_start.date()} ~ {self._earn.cycle_end.date()}"
             )
 
     def _determine_current_mode(self) -> str:
@@ -1706,7 +1715,7 @@ class DeltaNeutralBot:
             # H3 fix: 양쪽 포지션이 반대 방향인지 검증 (기존: 무조건 복원)
             if nado_side == grvt_side:
                 logger.critical(f"Recovery: NADO={nado_side} GRVT={grvt_side} — 같은 방향! 수동 확인 필요")
-                await self._telegram.send_alert(f"[🚨 RECOVERY] 양쪽 동일 방향({nado_side}) — 수동 확인 필요")
+                await self._telegram.send_alert(f"<b>[🚨 RECOVERY]</b> 양쪽 동일 방향({nado_side}) — 수동 확인 필요")
                 return
 
             # entry_price가 0이면 mark price로 대체 (C4 fix 전 데이터 호환)
@@ -1739,7 +1748,7 @@ class DeltaNeutralBot:
                 logger.info(f"Recovery: target_notional=${self._state.target_notional:.0f} (역산)")
             self._save_state()
             logger.info(f"Recovery: restored positions for {pair}, direction={self._state.direction}")
-            await self._telegram.send_alert(f"[RECOVERY] 포지션 복원 완료: {pair} (direction={self._state.direction})")
+            await self._telegram.send_alert(f"<b>[RECOVERY]</b> 포지션 복원 완료: {pair} (direction={self._state.direction})")
         elif not nado_pos and not grvt_pos:
             self._state.cycle_state = CycleState.IDLE
             self._positions.clear()
@@ -1761,7 +1770,7 @@ class DeltaNeutralBot:
             self._state.exit_reason = "orphan_detected"
             self._save_state()
             await self._telegram.send_alert(
-                f"[🚨 ORPHAN] {orphan_exchange} {pair} {orphan_side} {orphan_size:.4f} "
+                f"<b>[🚨 ORPHAN]</b> {orphan_exchange} {pair} {orphan_side} {orphan_size:.4f} "
                 f"(${orphan_notional:,.0f}) 편측 감지\n"
                 f"⚠️ 자동 청산 안 함 — 수동 확인 필요 (반대쪽 API 빈 응답 가능성)"
             )
@@ -1957,11 +1966,12 @@ class DeltaNeutralBot:
         async def on_history():
             recent = self._cycle_history[-5:] if self._cycle_history else []
             if not recent:
-                await self._telegram.send_message("📋 히스토리 없음")
+                await self._telegram.send_message("📋 아직 완료된 사이클 없음")
                 return
-            lines = ["📋 <b>Recent Cycles</b>", "━━━━━━━━━━━━━━━"]
+            lines = ["📋 <b>최근 사이클</b>", "━━━━━━━━━━━━━━━"]
             for c in reversed(recent):
-                lines.append(f"{c.pair} | {c.exit_reason} | ${c.net_pnl:+.2f} | Vol ${c.volume_generated:,.0f}")
+                pnl_emoji = "🟢" if c.net_pnl >= 0 else "🔴"
+                lines.append(f"#{c.cycle_id} {c.pair} {pnl_emoji} ${c.net_pnl:+.2f} | {c.exit_reason} | Vol ${c.volume_generated:,.0f}")
             await self._telegram.send_message("\n".join(lines))
 
         async def on_funding():
@@ -1969,7 +1979,7 @@ class DeltaNeutralBot:
             nr = await self._nado.get_funding_rate(pair)
             gr = await self._grvt.get_funding_rate(pair)
             lines = [
-                "📈 <b>Funding Rates</b>",
+                "💰 <b>Funding Rates</b>",
                 "━━━━━━━━━━━━━━━",
                 f"NADO (1h): {nr or 'N/A'}",
                 f"GRVT (8h): {gr or 'N/A'}",
@@ -1982,15 +1992,15 @@ class DeltaNeutralBot:
                 self._state.cycle_state = CycleState.EXIT
                 self._state.exit_reason = "manual_rebalance"
                 self._save_state()
-                await self._telegram.send_alert("[🔄 REBALANCE] 수동 EXIT 트리거")
+                await self._telegram.send_alert("<b>[🔄 REBALANCE]</b> 수동 EXIT 트리거")
             else:
-                await self._telegram.send_message("현재 HOLD 상태가 아닙니다")
+                await self._telegram.send_message("현재 상태에서는 수동 리밸런스가 불가합니다. HOLD 상태에서만 가능합니다.")
 
         async def on_close_now():
             if self._state.cycle_state != CycleState.HOLD:
                 await self._telegram.send_alert(
-                    f"현재 상태({self._state.cycle_state.value})에서는 강제 청산 불가\n"
-                    f"HOLD 상태에서만 가능"
+                    f"현재 상태({self._state.cycle_state.value})에서는 강제 청산 불가합니다.\n"
+                    f"HOLD 상태에서만 가능합니다."
                 )
                 return
             if not self._positions:
@@ -2001,11 +2011,41 @@ class DeltaNeutralBot:
             self._save_state()
             await self._telegram.send_alert("🔚 강제 청산 시작 — EXIT 진입")
 
+        async def on_positions():
+            nado_pos = await self._nado.get_positions(self._state.pair) if self._state.pair else []
+            grvt_pos = await self._grvt.get_positions(self._state.pair) if self._state.pair else []
+            lines = ["📌 <b>Positions</b>", "━━━━━━━━━━━━━━━"]
+            if nado_pos:
+                p = nado_pos[0]
+                sz = abs(float(p.get("size", p.get("amount", 0))))
+                side = p.get("side", "?")
+                lines.append(f"NADO: {side} {sz:.4f} {self._state.pair}")
+            else:
+                lines.append("NADO: 없음")
+            if grvt_pos:
+                p = grvt_pos[0]
+                sz = abs(float(p.get("size", p.get("contracts", 0))))
+                side = p.get("side", "?")
+                lines.append(f"GRVT: {side} {sz:.4f} {self._state.pair}")
+            else:
+                lines.append("GRVT: 없음")
+            await self._telegram.send_message("\n".join(lines))
+
         async def on_stop():
+            if not self._running:
+                return
             self._running = False
             if self._positions and self._state.pair:
                 await self._execute_exit(self._state.pair)
-            await self._telegram.send_alert("[⏹ STOP] 봇 종료")
+            await self._telegram.send_alert("<b>[⏹ STOP]</b> 포지션 청산 후 봇 종료합니다")
+            Path(".stop_bot").touch()
+
+        async def on_kill():
+            if not self._running:
+                return
+            self._running = False
+            self._save_state()
+            await self._telegram.send_alert("<b>[💀 KILL]</b> 포지션 유지, 봇만 즉시 종료합니다")
             Path(".stop_bot").touch()
 
         async def on_text(text: str):
@@ -2020,12 +2060,12 @@ class DeltaNeutralBot:
                 self._save_state()
 
         self._telegram.register_callback(BTN_STATUS, on_status)
-        self._telegram.register_callback(BTN_EARN, on_earn)
         self._telegram.register_callback(BTN_HISTORY, on_history)
         self._telegram.register_callback(BTN_FUNDING, on_funding)
-        self._telegram.register_callback(BTN_REBALANCE, on_rebalance)
+        self._telegram.register_callback(BTN_POSITIONS, on_positions)
         self._telegram.register_callback(BTN_CLOSE, on_close_now)
         self._telegram.register_callback(BTN_STOP, on_stop)
+        self._telegram.register_callback(BTN_KILL, on_kill)
         self._telegram.register_text_handler(on_text)
 
     # --- 데일리 리포트 ---
@@ -2082,6 +2122,7 @@ class DeltaNeutralBot:
 
         await self._nado.set_leverage(self._state.pair or self.cfg.PAIR_DEFAULT, self.cfg.LEVERAGE)
 
+        await self._telegram.flush_pending_updates()
         await self._register_telegram_handlers()
         # 시작 시 활성 포지션 있는지에 따라 메시지 다르게
         has_position = bool(self._positions) or self._state.cycle_state in (
@@ -2092,7 +2133,7 @@ class DeltaNeutralBot:
         else:
             pair_line = f"이전 페어: {self._state.pair or 'N/A'} | 다음 IDLE에서 새 페어 탐색"
         await self._telegram.send_message(
-            f"[🚀 START] NADO×GRVT 봇 가동\n"
+            f"<b>[🚀 START]</b> NADO×GRVT 봇 가동\n"
             f"{pair_line}\n"
             f"레버리지: {self.cfg.LEVERAGE}x | 모드: {self._state.mode.value}"
         )

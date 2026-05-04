@@ -378,7 +378,9 @@ class GrvtClient(BaseExchangeClient):
             close_price, size = self._align_tick(grvt_sym, close_price, size)
             if size <= 0:
                 return False
-            params = {"post_only": True} if post_only else {}
+            params = {"reduce_only": True}
+            if post_only:
+                params["post_only"] = True
             result = await self._retry(
                 self._api.create_order,
                 grvt_sym, "limit", close_side, size, close_price, params,
