@@ -67,7 +67,7 @@ class Config:
 
         # ===== 모니터링 및 안전 설정 =====
         self.POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "3"))  # 초
-        self.MARGIN_WARNING_PCT = float(os.getenv("MARGIN_WARNING_PCT", "15"))
+        self.MARGIN_WARNING_PCT = float(os.getenv("MARGIN_WARNING_PCT", "12"))
         self.MARGIN_EMERGENCY_PCT = float(os.getenv("MARGIN_EMERGENCY_PCT", "10"))
         self.CIRCUIT_BREAKER_FAILS = int(os.getenv("CIRCUIT_BREAKER_FAILS", "5"))
         # HOLD_SUSPENDED: API 장애 시 포지션 유지하며 대기 (양빵 헷지라 당장 위험 없음)
