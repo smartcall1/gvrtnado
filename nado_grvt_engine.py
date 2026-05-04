@@ -1113,38 +1113,58 @@ class DeltaNeutralBot:
                 leverage=self.cfg.LEVERAGE, margin=grvt_margin,
             )
 
-            # 진입 완료 후 거래소 실제 사이즈 재동기화 (안전장치).
-            # 응급 청산 실패 같은 엣지 케이스로 tracking이 거래소와 어긋날 수 있음.
-            # 1% 초과 drift 감지 시 _positions를 실측값으로 보정.
+            # 진입 완료 후 양쪽 실측 조회 → NADO 부족분 보정 주문.
+            # NADO SDK가 실체결 수량을 반환하지 않아 taker 슬리피지로 누적 부족 발생.
             try:
                 nado_real = await self._nado.get_positions(pair)
                 grvt_real = await self._grvt.get_positions(pair)
-                if nado_real:
-                    nado_actual = abs(float(nado_real[0].get("size", nado_real[0].get("amount", 0))))
-                    if nado_actual > 0 and abs(nado_actual - nado_filled_qty) > nado_filled_qty * 0.01:
-                        actual_notional = nado_actual * nado_vwap
-                        logger.warning(
-                            f"[ENTRY SYNC] NADO drift: tracked qty {nado_filled_qty:.6f} → 실측 {nado_actual:.6f} "
-                            f"(notional ${nado_notional:.0f} → ${actual_notional:.0f})"
+                nado_actual = abs(float(nado_real[0].get("size", nado_real[0].get("amount", 0)))) if nado_real else 0
+                grvt_actual = abs(float(grvt_real[0].get("size", grvt_real[0].get("contracts", 0)))) if grvt_real else 0
+
+                shortfall = grvt_actual - nado_actual
+                if shortfall > 0 and grvt_actual > 0 and shortfall / grvt_actual > 0.005:
+                    logger.warning(
+                        f"[ENTRY RECON] 수량 불일치: GRVT {grvt_actual:.4f} vs NADO {nado_actual:.4f} "
+                        f"(부족 {shortfall:.4f}) — 보정 주문"
+                    )
+                    for recon_attempt in range(3):
+                        cur_price = await self._nado.get_mark_price(pair)
+                        if not cur_price:
+                            break
+                        slip = self.cfg.SLIPPAGE_PCT
+                        recon_price = cur_price * (1 + slip) if nado_side == "BUY" else cur_price * (1 - slip)
+                        recon_margin = shortfall * cur_price / nado_eff_lev
+                        recon_res = await self._nado.place_limit_order(
+                            pair, nado_side, shortfall, recon_price,
+                            isolated_margin=recon_margin,
                         )
-                        await self._telegram.send_alert(
-                            f"[⚠️ ENTRY SYNC] NADO {pair} 실측과 차이 — tracking 보정"
-                        )
-                        self._positions["nado"].notional = actual_notional
-                        self._positions["nado"].margin = actual_notional / self.cfg.LEVERAGE
-                if grvt_real:
-                    grvt_actual = abs(float(grvt_real[0].get("size", grvt_real[0].get("contracts", 0))))
-                    if grvt_actual > 0 and abs(grvt_actual - grvt_filled_qty) > grvt_filled_qty * 0.01:
-                        actual_notional = grvt_actual * grvt_vwap
-                        logger.warning(
-                            f"[ENTRY SYNC] GRVT drift: tracked qty {grvt_filled_qty:.6f} → 실측 {grvt_actual:.6f} "
-                            f"(notional ${grvt_notional:.0f} → ${actual_notional:.0f})"
-                        )
-                        await self._telegram.send_alert(
-                            f"[⚠️ ENTRY SYNC] GRVT {pair} 실측과 차이 — tracking 보정"
-                        )
-                        self._positions["grvt"].notional = actual_notional
-                        self._positions["grvt"].margin = actual_notional / self.cfg.LEVERAGE
+                        if recon_res.status in ("filled", "matched"):
+                            logger.info(f"[ENTRY RECON] 보정 성공 (시도 {recon_attempt+1}): +{shortfall:.4f}")
+                            await self._telegram.send_alert(
+                                f"[✅ RECON] NADO {pair} +{shortfall:.4f} 보정 완료"
+                            )
+                            break
+                        logger.warning(f"[ENTRY RECON] 보정 실패 (시도 {recon_attempt+1}): {recon_res.message}")
+                        await asyncio.sleep(3)
+                    # 보정 후 재조회
+                    nado_real = await self._nado.get_positions(pair)
+                    nado_actual = abs(float(nado_real[0].get("size", nado_real[0].get("amount", 0)))) if nado_real else nado_actual
+
+                # tracking 보정 (실측 기준)
+                if nado_actual > 0:
+                    actual_notional = nado_actual * nado_vwap
+                    if abs(nado_actual - nado_filled_qty) > nado_filled_qty * 0.005:
+                        logger.info(f"[ENTRY SYNC] NADO qty {nado_filled_qty:.4f} → 실측 {nado_actual:.4f}")
+                    self._positions["nado"].notional = actual_notional
+                    self._positions["nado"].entry_price = nado_vwap
+                    self._positions["nado"].margin = actual_notional / self.cfg.LEVERAGE
+                if grvt_actual > 0:
+                    actual_notional = grvt_actual * grvt_vwap
+                    if abs(grvt_actual - grvt_filled_qty) > grvt_filled_qty * 0.005:
+                        logger.info(f"[ENTRY SYNC] GRVT qty {grvt_filled_qty:.4f} → 실측 {grvt_actual:.4f}")
+                    self._positions["grvt"].notional = actual_notional
+                    self._positions["grvt"].entry_price = grvt_vwap
+                    self._positions["grvt"].margin = actual_notional / self.cfg.LEVERAGE
             except Exception as e:
                 logger.warning(f"[ENTRY SYNC] 거래소 사이즈 조회 실패 (tracking 그대로 사용): {e}")
 
