@@ -466,6 +466,20 @@ class DeltaNeutralBot:
         if hold_hours >= mode_params["min_hold_hours"]:
             # 1) 큰 수익: spread_exit 임계 도달
             if pnl_for_exit >= mode_params["spread_exit"]:
+                # stale balance 방지: fresh balance로 재확인 (5분 갱신 간 노이즈 > 임계값 가능)
+                if self._state.entry_total_balance > 0:
+                    fresh_nado = await self._nado.get_balance()
+                    fresh_grvt = await self._grvt.get_balance()
+                    fresh_pnl = fresh_nado + fresh_grvt - self._state.entry_total_balance
+                    self._state.nado_balance = fresh_nado
+                    self._state.grvt_balance = fresh_grvt
+                    self._save_state()
+                    if fresh_pnl < mode_params["spread_exit"]:
+                        logger.info(
+                            f"spread_exit 보류: stale=${pnl_for_exit:.2f} → fresh=${fresh_pnl:.2f}"
+                        )
+                        return
+                    pnl_for_exit = fresh_pnl
                 self._state.cycle_state = CycleState.EXIT
                 self._state.exit_reason = "spread_profit"
                 self._save_state()
@@ -482,11 +496,23 @@ class DeltaNeutralBot:
                 and real_pnl is not None
                 and real_pnl >= self.cfg.URGENT_BREAK_EVEN_THRESHOLD
             ):
+                # stale balance 방지: fresh balance로 재확인
+                fresh_nado = await self._nado.get_balance()
+                fresh_grvt = await self._grvt.get_balance()
+                fresh_pnl = fresh_nado + fresh_grvt - self._state.entry_total_balance
+                self._state.nado_balance = fresh_nado
+                self._state.grvt_balance = fresh_grvt
+                self._save_state()
+                if fresh_pnl < self.cfg.URGENT_BREAK_EVEN_THRESHOLD:
+                    logger.info(
+                        f"break_even 보류: stale=${real_pnl:.2f} → fresh=${fresh_pnl:.2f}"
+                    )
+                    return
                 self._state.cycle_state = CycleState.EXIT
                 self._state.exit_reason = "break_even"
                 self._save_state()
                 await self._telegram.send_alert(
-                    f"<b>[🔔 EXIT 결정]</b> {pair} | break_even | PnL: ${real_pnl:+.2f}"
+                    f"<b>[🔔 EXIT 결정]</b> {pair} | break_even | PnL: ${fresh_pnl:+.2f}"
                 )
                 return
 
