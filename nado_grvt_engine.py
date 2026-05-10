@@ -82,6 +82,10 @@ class DeltaNeutralBot:
         self._exit_stuck_since: float = 0.0
         self._exit_lock = asyncio.Lock()
 
+        if self._state.cycle_state == CycleState.ENTER and self._enter_since == 0.0:
+            self._enter_since = time.time()
+            logger.info("[INIT] ENTER 상태 복구 — _enter_since 타임스탬프 재설정")
+
     def _init_earn(self) -> EarnState:
         if self._state.earn:
             return EarnState.from_dict(self._state.earn)

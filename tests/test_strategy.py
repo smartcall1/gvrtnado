@@ -94,7 +94,7 @@ def test_determine_mode_volume_met():
         days_left=20, volume_remaining=0,
         daily_capacity=50000,
     )
-    assert mode == "HOLD"
+    assert mode == "VOLUME"
 
 
 def test_determine_mode_urgent():

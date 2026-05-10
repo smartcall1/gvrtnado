@@ -79,7 +79,7 @@ async def test_strategy():
     result("determine_mode(trades not met)", m == "VOLUME_URGENT", f"mode={m}")
 
     m = determine_mode(True, True, 10, 0, 50000)
-    result("determine_mode(all met)", m == "HOLD", f"mode={m}")
+    result("determine_mode(all met)", m == "VOLUME", f"mode={m}")
 
     m = determine_mode(False, True, 10, 100000, 50000)
     result("determine_mode(volume not met, enough time)", m == "VOLUME", f"mode={m}")

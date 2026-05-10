@@ -76,7 +76,7 @@ def determine_mode(
     if not trades_met:
         return "VOLUME_URGENT"
     if volume_met:
-        return "HOLD"
+        return "VOLUME"
     daily_needed = volume_remaining / max(days_left, 1)
     if daily_needed > daily_capacity * 0.7:
         return "VOLUME_URGENT"
