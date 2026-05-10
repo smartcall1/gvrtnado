@@ -181,10 +181,15 @@ class DeltaNeutralBot:
             self.cfg.LEVERAGE, self.cfg.MARGIN_BUFFER,
         )
         min_liq = max(est_notional * 3, 10000)
+        mode = self._state.mode
+        min_spread = self.cfg.MIN_FUNDING_SPREAD
+        if mode in (OperatingMode.VOLUME, OperatingMode.VOLUME_URGENT):
+            min_spread = self.cfg.MIN_FUNDING_SPREAD_VOLUME
         best_pair = self._pair_mgr.best_pair(
             funding_spreads=funding_spreads,
             liquidities=liquidities,
             min_liquidity=min_liq,
+            min_funding_spread=min_spread,
         )
         logger.info(f"[IDLE] selected pair: {best_pair}")
         self._state.pair = best_pair

@@ -45,6 +45,7 @@ class PairManager:
         funding_spreads: dict[str, float],
         liquidities: dict[str, float],
         min_liquidity: float = 75000,
+        min_funding_spread: float = 0.0,
     ) -> str:
         candidates = self.common_pairs
         if not candidates:
@@ -57,8 +58,10 @@ class PairManager:
             liq = liquidities.get(pair, 0)
             if liq < min_liquidity:
                 continue
-            boost = self.get_boost(pair)
             fund = funding_spreads.get(pair, 0)
+            if min_funding_spread > 0 and fund < min_funding_spread:
+                continue
+            boost = self.get_boost(pair)
             score = (
                 (boost["nado"] + boost["grvt"]) * 3.0
                 + fund * 1000
@@ -70,7 +73,7 @@ class PairManager:
 
         if best_score <= -999.0 and funding_spreads:
             top = max(funding_spreads, key=funding_spreads.get)
-            logger.info(f"No pair passed liquidity filter, picking best funding spread: {top}")
+            logger.info(f"No pair passed liquidity+funding filter, picking best funding spread: {top}")
             best_pair = top
 
         return best_pair
